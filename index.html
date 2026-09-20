@@ -152,8 +152,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.1";
-const WRT_VERSION_CODE = 16;
+const WRT_VERSION = "2.0.2";
+const WRT_VERSION_CODE = 17;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -495,6 +495,14 @@ function panToAlert(p, immediate) {
 
 /* Visual tour: the map continuously cycles through the most important alerts,
    so the radar never sits in one spot. Syncs with the threat banner. */
+/* Short spoken line for the tour — keeps the voice in sync with the map. */
+function tourLine(p) {
+  const ev = (p.event || "weather alert").toLowerCase();
+  const area = formatArea(p);
+  const art = /^[aeiou]/.test(ev) ? "an" : "a";
+  return "the " + ev + (area ? " in " + area : "");
+}
+
 let tourIndex = 0;
 function mapTour() {
   if (!map || !currentFeatures.length) return;
@@ -519,6 +527,13 @@ function mapTour() {
     if (!c) return;
     try { map.flyTo([c.lat, c.lon], 7, { duration: 2.5 }); }
     catch (e) { try { map.setView([c.lat, c.lon], 7); } catch (e2) {} }
+    // Voice follows the map: say what we're looking at as we arrive.
+    try {
+      if (voice.enabled && chatterMode() !== "off") {
+        const tp = f.properties || {};
+        queueSpeech("Now looking at " + tourLine(tp) + ".", 55);
+      }
+    } catch (e) {}
   } catch (e) {}
 }
 
@@ -678,9 +693,15 @@ function formatArea(p) {
   for (const [st, names] of Object.entries(byState)) {
     const uniq = [...new Set(names)];
     const countyWord = uniq.length > 1 ? "counties" : "county";
-    const list = uniq.length > 2
-      ? uniq.slice(0, -1).join(", ") + ", and " + uniq[uniq.length - 1]
-      : uniq.join(" and ");
+    // Cap long county lists: name a few, then summarize the rest.
+    let list;
+    if (uniq.length > 6) {
+      list = uniq.slice(0, 4).join(", ") + ", and " + (uniq.length - 4) + " more counties";
+    } else {
+      list = uniq.length > 2
+        ? uniq.slice(0, -1).join(", ") + ", and " + uniq[uniq.length - 1]
+        : uniq.join(" and ");
+    }
     chunks.push(st && STATE_NAMES[st] ? (STATE_NAMES[st] + ": " + list + " " + countyWord) : (list + " " + countyWord));
   }
   return chunks.join(". ");
@@ -719,62 +740,163 @@ const STORY_BITS = [
 let storyIndex = 0;
 
 /* Colorful ways to say the event name — gives the voice character. */
-function eventColorful(event) {
-  if (/tornado warning/i.test(event)) {
-    const v = ["a tornado warning", "a confirmed tornado situation brewing", "tornado warning, the big one"];
-    return v[Math.floor(Math.random() * v.length)];
-  }
-  if (/tornado watch/i.test(event)) return "a tornado watch";
-  if (/severe thunderstorm warning/i.test(event)) {
-    const v = ["a severe thunderstorm warning", "a nasty severe storm warning"];
-    return v[Math.floor(Math.random() * v.length)];
-  }
-  if (/flash flood warning/i.test(event)) {
-    const v = ["a flash flood warning", "a flash flood situation"];
-    return v[Math.floor(Math.random() * v.length)];
-  }
-  return event;
+/* ============ YallBot-style voice ============
+   Warnings follow a strict template: location -> threat/motion -> towns in
+   path -> safety action. Personality (sass, Nimbus, asides) lives ONLY in
+   calm-weather chatter — never inside a warning. */
+
+/* "until 9:45 AM Eastern" from the expires timestamp. Zone from the UTC offset. */
+function expiresSpoken(p) {
+  try {
+    const e = p.expires || p.ends;
+    if (!e) return null;
+    const d = new Date(e);
+    let h = d.getHours(), m = d.getMinutes();
+    const ap = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
+    let tz = "";
+    const om = String(e).match(/([+-])(\d{2}):?(\d{2})\s*$/);
+    if (om) {
+      const off = (om[1] === "-" ? -1 : 1) * (parseInt(om[2], 10) + parseInt(om[3], 10) / 60);
+      // US daylight time runs roughly March–November; normalize to standard offset.
+      const mo = d.getMonth();
+      const dst = mo >= 2 && mo <= 10;
+      const base = dst ? off + 1 : off;
+      if (base === -5) tz = " Eastern";
+      else if (base === -6) tz = " Central";
+      else if (base === -7) tz = " Mountain";
+      else if (base === -8) tz = " Pacific";
+      else if (base === -9) tz = " Alaska";
+      else if (base === -10) tz = " Hawaii";
+    }
+    return "until " + h + (m ? ":" + String(m).padStart(2, "0") : "") + " " + ap + tz;
+  } catch (err) { return null; }
+}
+
+/* Tornado detection: "a confirmed tornado" vs "radar-indicated rotation". */
+function tornadoThreat(p) {
+  try {
+    const det = (p.parameters && p.parameters.tornadoDetection && p.parameters.tornadoDetection[0]) || "";
+    if (/OBSERVED/i.test(det)) return "a confirmed tornado";
+  } catch (e) {}
+  const desc = p.description || "";
+  if (/confirmed/i.test(desc) && /tornado/i.test(desc)) return "a confirmed tornado";
+  return "radar-indicated rotation";
+}
+
+/* Towns in the path, from "* Locations impacted include..." */
+function extractTowns(desc) {
+  const m = desc.match(/\*\s*Locations impacted include[\s\S]*?\n\n/);
+  if (!m) return null;
+  let towns = m[0].replace(/\*\s*Locations impacted include[\s\S]*?include\.\.\./i, "")
+    .replace(/\.\.\./g, "").replace(/\n/g, " ").trim();
+  towns = towns.split(/,/).map(s => s.trim()).filter(Boolean).slice(0, 5);
+  if (!towns.length) return null;
+  return towns.join(", ");
+}
+
+/* Rain rate, e.g. "heavy rain falling at 1 to 2 inches per hour". */
+function extractRainRate(desc) {
+  const m = desc.match(/between\s+([\d.]+)\s+and\s+([\d.]+)\s+inch(?:es)?/i) ||
+            desc.match(/([\d.]+)\s+to\s+([\d.]+)\s+inch(?:es)?\s+per\s+hour/i);
+  if (m) return "Heavy rain is falling at " + m[1] + " to " + m[2] + " inches per hour";
+  if (/heavy rain/i.test(desc)) return "Heavy rain is falling across the area";
+  return null;
+}
+
+/* Impact hooks for severe thunderstorm warnings — YallBot leads with the punch. */
+function svrHook(area) {
+  const v = [
+    "Roofs, siding, and trees are about to take a beating across " + area + ".",
+    "Heads up, " + area + " — this line has some real punch to it.",
+    "Y'all, this is a nasty line working through " + area + ".",
+    "Folks in " + area + ", this storm means business.",
+  ];
+  return v[Math.floor(Math.random() * v.length)];
+}
+
+/* Calm-weather personality — Nimbus, theatrical asides, snack jokes.
+   NEVER used inside warnings. */
+function calmAside() {
+  const v = [
+    "Nimbus is sniffing the upstream data. Says it's quiet out there. Good dog.",
+    "We're tracking this live, folks. Keep an eye up.",
+    "GASPS DRAMATICALLY! Just kidding — it's calm. Had to keep you on your toes.",
+    "hah, chuckles. Quiet on the radar. I'll take it.",
+    "Nimbus wanted a snack, but all I had was upstream data. He ate it anyway.",
+    "Slow weather day. The radar's just vibing.",
+    "I'm watching the whole country for you, y'all. Not a thing popping off right now.",
+  ];
+  return v[Math.floor(Math.random() * v.length)];
 }
 
 function buildAnnouncement(p) {
-  const event = (p.event || "Weather alert").toLowerCase();
+  const event = p.event || "Weather alert";
+  const ev = event.toLowerCase();
   const area = formatArea(p);
-  // Story opening — varied, personal, with character.
-  const eventColor = eventColorful(event);
-  const openers = [
-    nextOpener() + " we've got " + articleFor(event) + " " + eventColor,
-    nextOpener() + " there's " + articleFor(event) + " " + eventColor + " out there",
-    nextOpener() + " " + STORY_BITS[storyIndex % STORY_BITS.length] + " We've got " + articleFor(event) + " " + eventColor,
-    nextOpener() + " heads up, " + eventColor + " on the board",
-  ];
-  storyIndex++;
-  let text = openers[Math.floor(Math.random() * openers.length)];
-  if (area) text += ", covering " + area;
-  text += ". ";
-  // Development: storm motion, like describing what's unfolding.
-  const motion = extractMotion(p.description || "");
-  if (motion) text += "It's " + motion + ", and ";
-  // Road impacts, conversational.
-  const impacts = extractRoadImpacts(p.description || "");
-  if (impacts) text += "they're saying " + impacts + " ";
-  // Spotter / law-enforcement reports — the human detail.
+  const exp = expiresSpoken(p);
   const desc = p.description || "";
-  const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
-  if (m) {
-    let report = m[1].trim();
-    if (report.length > 150) report = report.slice(0, 150) + ".";
-    text += "Now, " + report.charAt(0).toLowerCase() + report.slice(1) + " ";
+  let text = "";
+
+  if (/tornado warning/i.test(ev)) {
+    // Location -> threat/motion -> towns in path -> action.
+    text = (area ? area + ": " : "") + "tornado warning" + (exp ? " " + exp + "." : ".");
+    const motion = extractMotion(desc);
+    const towns = extractTowns(desc);
+    const threat = tornadoThreat(p);
+    text += " Radar's tracking " + threat;
+    if (motion) text += ", " + motion.replace(/^heading /, "sliding ");
+    else text += " in the warned area";
+    text += ".";
+    if (towns) text += " In the path: " + towns + ".";
+    text += " Take cover now, away from windows.";
+    if (/mobile/i.test(desc) || Math.random() < 0.4) {
+      text += " Mobile homes aren't safe — get to sturdier shelter immediately.";
+    }
+  } else if (/severe thunderstorm warning/i.test(ev)) {
+    // Impact hook -> warning + expiration + counties -> motion/hazards -> action.
+    text = svrHook(area || "the warned area") + " ";
+    text += "Severe thunderstorm warning" + (exp ? " runs " + exp : "") +
+            (area ? " for " + area : "") + ".";
+    const motion = extractMotion(desc);
+    if (motion) text += " The line is " + motion.replace(/^heading /, "sliding ") + ".";
+    const haz = extractHazards(desc);
+    if (haz) text += " " + haz;
+    text += " Get inside now.";
+  } else if (/flash flood warning/i.test(ev)) {
+    text = "FLASH FLOODING: A Flash Flood Warning is active" +
+           (area ? " for " + area : "") + (exp ? " " + exp : "") + ".";
+    const rate = extractRainRate(desc);
+    if (rate) text += " " + rate + ".";
+    if (Math.random() < 0.5) text += " " + nextFloodSafety();
+  } else if (/tornado watch/i.test(ev)) {
+    text = "Tornado watch" + (area ? " for " + area : "") + (exp ? " " + exp : "") +
+           ". Conditions are favorable for tornadoes, folks. Keep an eye up and know where you'll shelter.";
+  } else if (/severe thunderstorm watch/i.test(ev)) {
+    text = "Severe thunderstorm watch" + (area ? " for " + area : "") + (exp ? " " + exp : "") +
+           ". Storms are firing up nearby. Keep an eye up, y'all.";
+  } else {
+    // Everything else: conversational but structured.
+    text = nextOpener() + " " + event.toLowerCase() + (area ? ", covering " + area : "") +
+           (exp ? ", " + exp : "") + ".";
+    const motion = extractMotion(desc);
+    if (motion) text += " It's " + motion + ".";
+    const impacts = extractRoadImpacts(desc);
+    if (impacts) text += " They're reporting " + impacts;
   }
-  // Stakes: what to do, like a friend would say it. Rotates, and not every time.
-  if (/tornado/i.test(event)) {
-    if (Math.random() < 0.6) text += nextTornadoSafety() + " ";
-  } else if (/flash flood/i.test(event)) {
-    if (Math.random() < 0.5) text += nextFloodSafety() + " ";
-  }
-  // Occasional sassy aside — YallBot flavor, not every time.
-  if (Math.random() < 0.25) text += nextAside() + " ";
-  if (text.length > 450) text = text.slice(0, 450) + ".";
+  if (text.length > 500) text = text.slice(0, 500) + ".";
   return text;
+}
+
+/* Hazards from a severe thunderstorm description, in folksy units. */
+function extractHazards(desc) {
+  const bits = [];
+  const g = desc.match(/(\d+)\s*mph\s*(?:wind\s*)?gusts/i);
+  if (g) bits.push(g[1] + " mile an hour gusts");
+  const h = desc.match(/(penny|nickel|quarter|golf ball|tennis ball|baseball|softball)\s*(?:size[d]?)?\s*hail/i);
+  if (h) bits.push(h[1].toLowerCase() + " hail");
+  if (!bits.length) return null;
+  return "Expect " + bits.join(" and ") + ".";
 }
 
 function extractRoadImpacts(desc) {
@@ -836,19 +958,26 @@ function chatterUpdate() {
   if (chatterMode() === "off") return;
   const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
   if (!feats.length) {
+    // Quiet: personality lives here. Nimbus, asides, all-clear with character.
     const now = Date.now();
     if (now - lastAllClear > 15 * 60000) {
       lastAllClear = now;
-      queueSpeech("All quiet out there. No active weather alerts in the country right now. I'm still watching, I'll let you know the moment something pops up.", 60);
+      if (Math.random() < 0.45) {
+        queueSpeech(calmAside(), 60);
+      } else {
+        queueSpeech("All quiet out there, y'all. No active weather alerts in the country right now. I'm still watching — I'll holler the moment something pops up.", 60);
+      }
     }
     return;
   }
   if (chatterMode() === "chatty") {
-    const f = feats[chatterIndex % feats.length];
+    // Warning check-in: refresh the current top threat like YallBot does.
+    const f = feats[chatterIndex % Math.min(feats.length, 8)];
     chatterIndex++;
     const p = f.properties || {};
-    queueSpeech(buildAnnouncement(p), 60);
-    panToAlert(f);
+    const checkin = Math.random() < 0.35 ? "Checking back in. " : "";
+    queueSpeech(checkin + buildAnnouncement(p), 60);
+    // Map movement is owned by mapTour now, so the voice and radar stay in sync.
   }
 }
 function chatterMode() { return store.get("chatter", "chatty"); }
@@ -1041,18 +1170,30 @@ function onNewStormReport(f) {
   panToAlert(f, true);
 }
 
+/* First poll: learn what's already out there silently (no 400-announcement
+   barrage, no hundred-pan stampede — that could overwhelm the app). After
+   that, only genuinely new alerts get announced. Also caps announcements
+   per poll so a big batch can't flood the voice queue. */
+let firstAlertPollDone = false;
 function processAlerts(features) {
   const liveIds = new Set();
+  const silentFirst = !firstAlertPollDone;
+  const newOnes = [];
   for (const f of features) {
     liveIds.add(f.id);
     if (!seenAlertIds.has(f.id)) {
       seenAlertIds.add(f.id);
-      onNewAlert(f);
+      if (!silentFirst) newOnes.push(f);
     }
   }
+  firstAlertPollDone = true;
   // Forget expired alerts so a re-issued alert counts as new.
   for (const id of [...seenAlertIds]) {
     if (!liveIds.has(id)) seenAlertIds.delete(id);
+  }
+  if (!silentFirst && newOnes.length) {
+    newOnes.sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+    for (const f of newOnes.slice(0, 5)) onNewAlert(f);
   }
   renderAlertsList();
   renderMarkers();
