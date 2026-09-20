@@ -76,7 +76,6 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
-                  maven { url "https://jitpack.io" } // sherpa-onnx (Kokoro voice engine)
               }
           }
           rootProject.name = "WeatherRealtime"
@@ -87,10 +86,7 @@ jobs:
               id 'com.android.application' version '8.5.2' apply false
           }
           EOF
-          # The Kokoro voice model roughly doubles the packaged assets, so the
-          # default Gradle heap is no longer enough (run #78 died with
-          # "Java heap space" in :app:collectReleaseDependencies after the
-          # Kokoro Java code compiled cleanly). GitHub runners have 16GB RAM.
+          # Larger Gradle heap for safety on the CI runners (GitHub runners have 16GB RAM).
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx4g
           EOF
@@ -113,12 +109,6 @@ jobs:
                   }
               }
               dependencies {
-                  // On-device AI voice (Kokoro via sherpa-onnx). Official build, re-published by JitPack.
-                  // v1.12.40 already includes Kokoro TTS support (added in sherpa-onnx 1.10.42).
-                  implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.40'
-                  // The voice engine is written in Kotlin; without the stdlib it crashes
-                  // on startup with NoClassDefFoundError (kotlin/jvm/internal/Intrinsics).
-                  implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
               }
           }
           EOF
@@ -174,19 +164,6 @@ jobs:
               private boolean ttsReady = false;
               private String pendingTts = null;
               private int ttsUtteranceSeq = 0;
-              // Kokoro on-device AI voice (sherpa-onnx): unlimited, offline.
-              // This is the app's only voice — it speaks every announcement.
-              private com.k2fsa.sherpa.onnx.OfflineTts kokoroTts = null;
-              private volatile boolean kokoroReady = false;
-              private volatile boolean kokoroStarting = false;
-              private volatile int kokoroGen = 0; // invalidates in-flight Kokoro synthesis/playback on stop
-              private volatile android.media.AudioTrack kokoroTrack = null;
-              // Last synthesis/playback outcome in plain words (e.g.
-              // "warm-up OK: 48210 samples" or "speak FAILED: <reason>").
-              // Shown in the Settings voice-status row so a silent failure
-              // can never hide. Written on worker threads, read on the
-              // WebView thread.
-              private volatile String kokoroSpeakInfo = "";
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -255,7 +232,6 @@ jobs:
                       }
                   }, "LynxosStore");
                   initTts();
-                  kokoroEnsureInit(); // warm up the offline AI voice in the background
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public String speak(String text) {
@@ -271,269 +247,10 @@ jobs:
                       }
                   }, "LynxosTts");
 
-                  /* Kokoro on-device AI voice: the app's only voice. Unlimited
-                     and offline — no key, no quota. Returns an utterance id,
-                     or null when the voice isn't warmed up yet (the page then
-                     falls through to the built-in voice). Synthesis runs on a
-                     worker thread; playback goes through one serialized
-                     AudioTrack so utterances can never double up. */
-                  webView.addJavascriptInterface(new Object() {
-                      @JavascriptInterface
-                      public String speak(String text) {
-                          try {
-                              if (text == null || text.isEmpty()) { kokoroSpeakInfo = "speak skipped: empty text"; return null; }
-                              if (!kokoroReady || kokoroTts == null) { kokoroSpeakInfo = "speak skipped: voice not ready"; kokoroEnsureInit(); return null; }
-                              kokoroSpeakInfo = "speak called: " + text.length() + " chars";
-                              kokoroGen++; // silence anything currently playing
-                              try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
-                              final String id = "kv" + (++ttsUtteranceSeq);
-                              final int gen = kokoroGen;
-                              final String t = text;
-                              new Thread(new Runnable() { @Override public void run() {
-                                  kokoroSpeakWorker(id, t, gen);
-                              } }).start();
-                              return id;
-                          } catch (Throwable th) {
-                              String msg = String.valueOf(th);
-                              if (msg.length() > 200) msg = msg.substring(0, 200);
-                              kokoroSpeakInfo = "speak FAILED at entry: " + msg;
-                              return null;
-                          }
-                      }
-                      @JavascriptInterface
-                      public void stop() {
-                          kokoroGen++;
-                          try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
-                      }
-                      // True once the offline AI voice is warmed up and speaking.
-                      // The page uses this to tell the user whether the new
-                      // voice is ready or still setting up.
-                      @JavascriptInterface
-                      public boolean isReady() { return kokoroReady && kokoroTts != null; }
-                      // If the last init attempt failed, the reason (saved to
-                      // a file so it survives to the next launch, when the app
-                      // reads it aloud as a startup heads-up). Empty when the
-                      // voice is ready or no failure was recorded.
-                      @JavascriptInterface
-                      public String getLastError() {
-                          try {
-                              if (kokoroReady) return "";
-                              java.io.File f = new java.io.File(getFilesDir(), "kokoro-voice/.last-error");
-                              if (!f.exists()) return "";
-                              java.io.FileInputStream in = new java.io.FileInputStream(f);
-                              byte[] b = new byte[(int) Math.min(f.length(), 512)];
-                              int n = in.read(b); in.close();
-                              if (n <= 0) return "";
-                              return new String(b, 0, n, "UTF-8");
-                          } catch (Throwable th) { return ""; }
-                      }
-                      // Last synthesis/playback outcome in plain words.
-                      // Shown in Settings under the voice status.
-                      @JavascriptInterface
-                      public String getLastSpeakInfo() {
-                          try { return kokoroSpeakInfo == null ? "" : kokoroSpeakInfo; }
-                          catch (Throwable th) { return ""; }
-                      }
-                  }, "KokoroVoice");
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
                   setContentView(webView);
                   webView.requestFocus();
-              }
-              /* Copy the bundled Kokoro voice out of the APK into private
-                 storage (native code needs real file paths), then build
-                 the sherpa-onnx TTS engine on a worker thread. The copy is
-                 resumable: files already synced are skipped and each file is
-                 written atomically, so killing the app mid-copy just resumes
-                 next launch instead of starting over. */
-              private void kokoroEnsureInit() {
-                  if (kokoroReady || kokoroStarting) return;
-                  kokoroStarting = true;
-                  new Thread(new Runnable() { @Override public void run() {
-                      try {
-                          java.io.File dest = new java.io.File(getFilesDir(), "kokoro-voice");
-                          java.io.File marker = new java.io.File(dest, ".ready");
-                          java.io.File errFile = new java.io.File(dest, ".last-error");
-                          if (!marker.exists()) {
-                              syncAssetDir("kokoro-voice", dest);
-                              marker.createNewFile();
-                          }
-                          java.io.File modelFile = findFirstEndingWith(dest, ".onnx", ".onnx.json");
-                          java.io.File voicesFile = findFirstEndingWith(dest, "voices.bin", null);
-                          java.io.File tokensFile = findFirstEndingWith(dest, "tokens.txt", null);
-                          java.io.File lexiconFile = findFirstEndingWith(dest, "lexicon-us-en.txt", null);
-                          java.io.File dataDir = findDirNamed(dest, "espeak-ng-data");
-                          if (modelFile == null || voicesFile == null || tokensFile == null)
-                              throw new RuntimeException("kokoro model not found");
-                          // sherpa-onnx Android: the OfflineTts constructor takes a
-                          // nullable AssetManager. Passing null selects the
-                          // file-based native path (newFromFile), which reads the
-                          // absolute filesystem paths set above directly.
-                          // Passing getAssets() makes native code treat those
-                          // absolute paths as APK asset names, which fails and
-                          // hard-crashes the whole process at startup (the 2.5.3
-                          // force-close: the native code never ran before
-                          // kotlin-stdlib was bundled in 2.5.3, so 2.5.2 only
-                          // went silent instead of crashing).
-                          // Voice: am_michael (sid 16), American male.
-                          com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig kokoro =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig();
-                          kokoro.setModel(modelFile.getAbsolutePath());
-                          kokoro.setVoices(voicesFile.getAbsolutePath());
-                          kokoro.setTokens(tokensFile.getAbsolutePath());
-                          kokoro.setDataDir(dataDir != null ? dataDir.getAbsolutePath() : "");
-                          if (lexiconFile != null) kokoro.setLexicon(lexiconFile.getAbsolutePath());
-                          com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
-                          modelConfig.setKokoro(kokoro);
-                          modelConfig.setNumThreads(4);
-                          com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
-                          config.setModel(modelConfig);
-                          config.setMaxNumSentences(1);
-                          kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
-                          // Honest warm-up: proves synthesis actually works,
-                          // not just that the engine constructed. The outcome
-                          // is shown in Settings (2.5.4 showed green "Ready"
-                          // while synthesis may have been silently failing).
-                          try {
-                              com.k2fsa.sherpa.onnx.GeneratedAudio warm =
-                                  kokoroTts.generate("Voice ready.", 16, 1.0f);
-                              float[] ws = warm != null ? warm.getSamples() : null;
-                              kokoroSpeakInfo = "warm-up OK: " + (ws == null ? -1 : ws.length) + " samples";
-                          } catch (Throwable t) {
-                              String msg = String.valueOf(t);
-                              if (msg.length() > 300) msg = msg.substring(0, 300);
-                              kokoroSpeakInfo = "warm-up FAILED: " + msg;
-                          }
-                          kokoroReady = true;
-                          try { errFile.delete(); } catch (Throwable ignored) {}
-                      } catch (Throwable t) {
-                          // Persist the reason so the next launch can report it
-                          // aloud instead of failing silently forever.
-                          try {
-                              java.io.File dest = new java.io.File(getFilesDir(), "kokoro-voice");
-                              dest.mkdirs();
-                              String msg = String.valueOf(t);
-                              if (msg.length() > 300) msg = msg.substring(0, 300);
-                              java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dest, ".last-error"));
-                              out.write(msg.getBytes("UTF-8"));
-                              out.close();
-                          } catch (Throwable ignored) {}
-                          kokoroStarting = false; // let a later speak() retry
-                      }
-                  } }).start();
-              }
-              /* Synthesize one utterance, then stream it to AudioTrack in
-                 chunks, checking the generation counter so stop() or a
-                 newer utterance always wins. Fires __onTtsDone exactly
-                 once per completed utterance; a stale generation exits
-                 silently because its replacement owns the queue now. */
-              private void kokoroSpeakWorker(String id, String text, int gen) {
-                  try {
-                      kokoroSpeakInfo = "synthesizing: " + text.length() + " chars";
-                      // sid 16 = am_michael, the app's American male voice.
-                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = kokoroTts.generate(text, 16, 1.0f);
-                      if (gen != kokoroGen) {
-                          // Stale: a newer utterance owns the queue now. Still
-                          // fire the callback (the page ignores stale ids) so
-                          // the queue can never stall on a dropped signal.
-                          try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
-                          return;
-                      }
-                      float[] samples = audio.getSamples();
-                      int sampleRate = audio.getSampleRate();
-                      if (samples == null || samples.length == 0 || sampleRate <= 0) {
-                          kokoroSpeakInfo = "speak FAILED: empty audio (samples=" +
-                              (samples == null ? "null" : samples.length) + " rate=" + sampleRate + ")";
-                          jsCall("window.__onTtsDone('" + id + "')");
-                          return;
-                      }
-                      kokoroSpeakInfo = "speak OK: " + samples.length + " samples @ " + sampleRate + "Hz";
-                      byte[] pcm = new byte[samples.length * 2];
-                      for (int i = 0; i < samples.length; i++) {
-                          float s = samples[i];
-                          if (s > 1.0f) s = 1.0f; else if (s < -1.0f) s = -1.0f;
-                          int v = (int) (s * 32767.0f);
-                          pcm[2 * i] = (byte) (v & 0xff);
-                          pcm[2 * i + 1] = (byte) ((v >> 8) & 0xff);
-                      }
-                      int minBuf = android.media.AudioTrack.getMinBufferSize(sampleRate,
-                          android.media.AudioFormat.CHANNEL_OUT_MONO,
-                          android.media.AudioFormat.ENCODING_PCM_16BIT);
-                      android.media.AudioTrack track = new android.media.AudioTrack(
-                          android.media.AudioManager.STREAM_MUSIC, sampleRate,
-                          android.media.AudioFormat.CHANNEL_OUT_MONO,
-                          android.media.AudioFormat.ENCODING_PCM_16BIT,
-                          Math.max(minBuf, 8192), android.media.AudioTrack.MODE_STREAM);
-                      kokoroTrack = track;
-                      track.play();
-                      int off = 0;
-                      while (off < pcm.length && gen == kokoroGen) {
-                          int len = Math.min(8192, pcm.length - off);
-                          track.write(pcm, off, len);
-                          off += len;
-                      }
-                      try { track.stop(); } catch (Throwable ignored) {}
-                      try { track.release(); } catch (Throwable ignored) {}
-                      if (kokoroTrack == track) kokoroTrack = null;
-                      if (gen == kokoroGen) jsCall("window.__onTtsDone('" + id + "')");
-                  } catch (Throwable t) {
-                      // Claimed the utterance but couldn't render it: record
-                      // the reason where Settings can show it, then advance
-                      // the queue rather than stalling it.
-                      String msg = String.valueOf(t);
-                      if (msg.length() > 300) msg = msg.substring(0, 300);
-                      kokoroSpeakInfo = "speak FAILED: " + msg;
-                      try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
-                  }
-              }
-              /* Copy one asset tree into private storage, skipping files that
-                 are already there. Each file is written to a .part file and
-                 renamed, so a kill mid-copy can never leave a half file:
-                 anything present is complete, and the next launch resumes
-                 where the last one stopped. */
-              private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
-                  String[] list = getAssets().list(assetPath);
-                  if (list == null || list.length == 0) {
-                      if (dest.exists()) return; // already synced
-                      java.io.InputStream in = getAssets().open(assetPath);
-                      dest.getParentFile().mkdirs();
-                      java.io.File tmp = new java.io.File(dest.getParentFile(), dest.getName() + ".part");
-                      java.io.OutputStream out = new java.io.FileOutputStream(tmp);
-                      byte[] buf = new byte[131072];
-                      int n;
-                      while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                      in.close(); out.close();
-                      if (!tmp.renameTo(dest)) { dest.delete(); tmp.renameTo(dest); }
-                      return;
-                  }
-                  dest.mkdirs();
-                  for (String name : list) syncAssetDir(assetPath + "/" + name, new java.io.File(dest, name));
-              }
-              private java.io.File findFirstEndingWith(java.io.File dir, String ext, String skipExt) {
-                  try {
-                      java.io.File[] kids = dir.listFiles();
-                      if (kids == null) return null;
-                      for (java.io.File k : kids) {
-                          if (k.isDirectory()) { java.io.File r = findFirstEndingWith(k, ext, skipExt); if (r != null) return r; }
-                          else { String n = k.getName(); if (n.endsWith(ext) && (skipExt == null || !n.endsWith(skipExt))) return k; }
-                      }
-                  } catch (Throwable ignored) {}
-                  return null;
-              }
-              private java.io.File findDirNamed(java.io.File dir, String name) {
-                  try {
-                      java.io.File[] kids = dir.listFiles();
-                      if (kids == null) return null;
-                      for (java.io.File k : kids) {
-                          if (k.isDirectory()) {
-                              if (name.equals(k.getName())) return k;
-                              java.io.File r = findDirNamed(k, name); if (r != null) return r;
-                          }
-                      }
-                  } catch (Throwable ignored) {}
-                  return null;
               }
               private void initTts() {
                   String engine = null;
@@ -611,17 +328,6 @@ jobs:
                       if (best != null) { try { tts.setVoice(best); } catch (Exception ignored) {} }
                   } catch (Exception ignored) {}
               }
-              private void jsCall(final String expr) {
-                  try {
-                      final WebView wv = webView;
-                      if (wv == null) return;
-                      wv.post(new Runnable() {
-                          @Override public void run() {
-                              try { wv.evaluateJavascript(expr, null); } catch (Exception ignored) {}
-                          }
-                      });
-                  } catch (Exception ignored) {}
-              }
               private String doTtsSpeak(String text) {
                   String id = "utt" + (++ttsUtteranceSeq);
                   try { tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id); } catch (Exception ignored) {}
@@ -665,26 +371,6 @@ jobs:
               }
           }
           EOF
-
-      - name: Download Kokoro voice model (offline AI voice)
-        run: |
-          set -e
-          mkdir -p app/src/main/assets/kokoro-voice
-          cd app/src/main/assets/kokoro-voice
-          # Official sherpa-onnx TTS release (per the sherpa-onnx docs):
-          # kokoro-int8-multi-lang-v1_0 — a much more natural-sounding
-          # on-device voice (Apache 2.0, free to bundle). The tarball
-          # contains model.int8.onnx, voices.bin, tokens.txt, lexicon
-          # files and espeak-ng-data/. Extracted into the APK assets,
-          # copied to private storage on first launch, and spoken through
-          # the KokoroVoice native bridge for every announcement.
-          # am_michael (sid 16) is the app's American male voice.
-          curl -fSL --retry 3 -o kokoro-voice.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
-          tar -xjf kokoro-voice.tar.bz2
-          rm kokoro-voice.tar.bz2
-          echo "Kokoro voice assets:"
-          find . -type f | head -20
-          du -sh .
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
