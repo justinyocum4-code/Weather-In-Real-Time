@@ -48,6 +48,7 @@
   /* Welcome overlay */
   #welcome { position: absolute; inset: 0; z-index: 50; background: rgba(0,0,0,.94);
     display: flex; align-items: center; justify-content: center; padding: 24px; }
+  #welcome[hidden] { display: none !important; }
   #welcome .card { max-width: 560px; background: #0a0a0a; border: 3px solid var(--gold);
     border-radius: 16px; padding: 28px; }
   #welcome h2 { color: var(--gold); margin-top: 0; }
@@ -127,8 +128,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.0";
-const WRT_VERSION_CODE = 1;
+const WRT_VERSION = "1.0.1";
+const WRT_VERSION_CODE = 2;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
