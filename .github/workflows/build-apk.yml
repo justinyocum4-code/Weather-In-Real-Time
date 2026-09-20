@@ -181,6 +181,12 @@ jobs:
               private volatile boolean kokoroStarting = false;
               private volatile int kokoroGen = 0; // invalidates in-flight Kokoro synthesis/playback on stop
               private volatile android.media.AudioTrack kokoroTrack = null;
+              // Last synthesis/playback outcome in plain words (e.g.
+              // "warm-up OK: 48210 samples" or "speak FAILED: <reason>").
+              // Shown in the Settings voice-status row so a silent failure
+              // can never hide. Written on worker threads, read on the
+              // WebView thread.
+              private volatile String kokoroSpeakInfo = "";
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -315,6 +321,13 @@ jobs:
                               return new String(b, 0, n, "UTF-8");
                           } catch (Throwable th) { return ""; }
                       }
+                      // Last synthesis/playback outcome in plain words.
+                      // Shown in Settings under the voice status.
+                      @JavascriptInterface
+                      public String getLastSpeakInfo() {
+                          try { return kokoroSpeakInfo == null ? "" : kokoroSpeakInfo; }
+                          catch (Throwable th) { return ""; }
+                      }
                   }, "KokoroVoice");
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
@@ -373,7 +386,20 @@ jobs:
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
                           kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
-                          try { kokoroTts.generate("Voice ready.", 16, 1.0f); } catch (Throwable ignored) {} // warm-up
+                          // Honest warm-up: proves synthesis actually works,
+                          // not just that the engine constructed. The outcome
+                          // is shown in Settings (2.5.4 showed green "Ready"
+                          // while synthesis may have been silently failing).
+                          try {
+                              com.k2fsa.sherpa.onnx.GeneratedAudio warm =
+                                  kokoroTts.generate("Voice ready.", 16, 1.0f);
+                              float[] ws = warm != null ? warm.getSamples() : null;
+                              kokoroSpeakInfo = "warm-up OK: " + (ws == null ? -1 : ws.length) + " samples";
+                          } catch (Throwable t) {
+                              String msg = String.valueOf(t);
+                              if (msg.length() > 300) msg = msg.substring(0, 300);
+                              kokoroSpeakInfo = "warm-up FAILED: " + msg;
+                          }
                           kokoroReady = true;
                           try { errFile.delete(); } catch (Throwable ignored) {}
                       } catch (Throwable t) {
@@ -401,13 +427,22 @@ jobs:
                   try {
                       // sid 16 = am_michael, the app's American male voice.
                       com.k2fsa.sherpa.onnx.GeneratedAudio audio = kokoroTts.generate(text, 16, 1.0f);
-                      if (gen != kokoroGen) return;
+                      if (gen != kokoroGen) {
+                          // Stale: a newer utterance owns the queue now. Still
+                          // fire the callback (the page ignores stale ids) so
+                          // the queue can never stall on a dropped signal.
+                          try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
+                          return;
+                      }
                       float[] samples = audio.getSamples();
                       int sampleRate = audio.getSampleRate();
                       if (samples == null || samples.length == 0 || sampleRate <= 0) {
+                          kokoroSpeakInfo = "speak FAILED: empty audio (samples=" +
+                              (samples == null ? "null" : samples.length) + " rate=" + sampleRate + ")";
                           jsCall("window.__onTtsDone('" + id + "')");
                           return;
                       }
+                      kokoroSpeakInfo = "speak OK: " + samples.length + " samples @ " + sampleRate + "Hz";
                       byte[] pcm = new byte[samples.length * 2];
                       for (int i = 0; i < samples.length; i++) {
                           float s = samples[i];
@@ -437,8 +472,12 @@ jobs:
                       if (kokoroTrack == track) kokoroTrack = null;
                       if (gen == kokoroGen) jsCall("window.__onTtsDone('" + id + "')");
                   } catch (Throwable t) {
-                      // Claimed the utterance but couldn't render it:
-                      // advance the queue rather than stalling it.
+                      // Claimed the utterance but couldn't render it: record
+                      // the reason where Settings can show it, then advance
+                      // the queue rather than stalling it.
+                      String msg = String.valueOf(t);
+                      if (msg.length() > 300) msg = msg.substring(0, 300);
+                      kokoroSpeakInfo = "speak FAILED: " + msg;
                       try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
                   }
               }
