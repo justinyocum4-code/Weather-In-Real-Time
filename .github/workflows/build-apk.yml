@@ -373,24 +373,27 @@ jobs:
                               marker.createNewFile();
                           }
                           java.io.File modelFile = findFirstEndingWith(dest, ".onnx", ".onnx.json");
+                          java.io.File tokensFile = findFirstEndingWith(dest, "tokens.txt", null);
                           java.io.File dataDir = findDirNamed(dest, "espeak-ng-data");
-                          if (modelFile == null) throw new RuntimeException("piper model not found");
+                          if (modelFile == null || tokensFile == null) throw new RuntimeException("piper model not found");
+                          // sherpa-onnx Java API: no-arg constructors + setters
+                          // (per the official sherpa-onnx TTS docs). The Android
+                          // OfflineTts takes the app AssetManager plus config;
+                          // absolute file paths are resolved as real files.
                           com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig vits =
-                              com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig.builder()
-                                  .setModel(modelFile.getAbsolutePath())
-                                  .setDataDir(dataDir != null ? dataDir.getAbsolutePath() : "")
-                                  .setLengthScale(1.0f)
-                                  .build();
+                              new com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig();
+                          vits.setModel(modelFile.getAbsolutePath());
+                          vits.setTokens(tokensFile.getAbsolutePath());
+                          vits.setDataDir(dataDir != null ? dataDir.getAbsolutePath() : "");
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
-                              com.k2fsa.sherpa.onnx.OfflineTtsModelConfig.builder()
-                                  .setVits(vits)
-                                  .setNumThreads(2)
-                                  .build();
+                              new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
+                          modelConfig.setVits(vits);
+                          modelConfig.setNumThreads(2);
                           com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
-                              com.k2fsa.sherpa.onnx.OfflineTtsConfig.builder()
-                                  .setModel(modelConfig)
-                                  .build();
-                          piperTts = new com.k2fsa.sherpa.onnx.OfflineTts(config);
+                              new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
+                          config.setModel(modelConfig);
+                          config.setMaxNumSentences(1);
+                          piperTts = new com.k2fsa.sherpa.onnx.OfflineTts(getAssets(), config);
                           try { piperTts.generate("Voice ready.", 0, 1.0f); } catch (Throwable ignored) {} // warm-up
                           piperReady = true;
                       } catch (Throwable t) {
@@ -474,7 +477,7 @@ jobs:
                       if (kids == null) return null;
                       for (java.io.File k : kids) {
                           if (k.isDirectory()) { java.io.File r = findFirstEndingWith(k, ext, skipExt); if (r != null) return r; }
-                          else { String n = k.getName(); if (n.endsWith(ext) && !n.endsWith(skipExt)) return k; }
+                          else { String n = k.getName(); if (n.endsWith(ext) && (skipExt == null || !n.endsWith(skipExt))) return k; }
                       }
                   } catch (Throwable ignored) {}
                   return null;
