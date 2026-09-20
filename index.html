@@ -823,8 +823,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.8";
-const WRT_VERSION_CODE = 39;
+const WRT_VERSION = "2.5.9";
+const WRT_VERSION_CODE = 40;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1088,7 +1088,14 @@ function initMap() {
   if (userLoc) map.setView([userLoc.lat, userLoc.lon], 7);
   else map.setView([39.8, -98.5], 4);
   document.getElementById("radar-map").setAttribute("tabindex", "-1");
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 12 }).addTo(map);
+  // Satellite imagery base (the TV-weather look) with city labels on top,
+  // so the map looks like real earth instead of a cartoon.
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 12, attribution: "Imagery: Esri World Imagery"
+  }).addTo(map);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", {
+    maxZoom: 12, zIndex: 20
+  }).addTo(map);
   alertPolyLayer = L.layerGroup().addTo(map);
   loadRadar();
   loadStormCells();
@@ -1186,22 +1193,22 @@ function iemReachable() {
 
 async function loadRadar() {
   if (!map) return;
-  // Clear old frames.
-  for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
-  if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
-  radarLayers = [];
-  // Cache-buster per refresh so the "latest" mosaic never sticks stale.
-  const epochMin = Math.floor(Date.now() / 60000);
+  // Build the new frame set FIRST, hidden. The old animation keeps playing
+  // underneath until the new frames are loaded — the radar never gaps.
+  const epochMin = Math.floor(Date.now() / 60000); // cache-buster per refresh
+  const newLayers = [];
   if (await iemReachable()) {
     // Iowa Environmental Mesonet: the real NWS NEXRAD Level-III base
-    // reflectivity mosaic — the TV-news look. One layer per 5-minute
-    // step gives a one-hour animation loop. Free, no key.
+    // reflectivity mosaic — the TV-news look. 8 frames = a 40-minute loop.
+    // Fewer, preloaded frames beat a longer loop that stutters on slow
+    // devices: every frame's tiles are fetched BEFORE the animation
+    // starts, so it never shows a half-loaded frame.
     const base = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913";
     const steps = [""];
-    for (let m = 5; m <= 55; m += 5) steps.push("-m" + (m < 10 ? "0" : "") + m + "m");
+    for (let m = 5; m <= 35; m += 5) steps.push("-m" + (m < 10 ? "0" : "") + m + "m");
     for (const s of steps) {
-      radarLayers.push(L.tileLayer(base + s + "/{z}/{x}/{y}.png?t=" + epochMin, {
-        opacity: 0.75, zIndex: 10, className: "radar-frame",
+      newLayers.push(L.tileLayer(base + s + "/{z}/{x}/{y}.png?t=" + epochMin, {
+        opacity: 0, zIndex: 10, className: "radar-frame",
         attribution: "Radar: Iowa Environmental Mesonet / NOAA NEXRAD"
       }));
     }
@@ -1215,17 +1222,33 @@ async function loadRadar() {
       const frames = past.slice(-8);
       for (const f of frames) {
         const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/5/1_1.png"; // 5 = NEXRAD Level III palette
-        radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10, className: "radar-frame" }));
+        newLayers.push(L.tileLayer(url, { opacity: 0, zIndex: 10, className: "radar-frame" }));
       }
     } catch (e) { return; }
   }
-  if (!radarLayers.length) return;
+  if (!newLayers.length) return;
+  // Preload: put every frame on the map at opacity 0 so its tiles fetch
+  // now. Wait until they're loaded (25s cap) before starting the loop.
+  for (const l of newLayers) l.addTo(map);
+  await new Promise((resolve) => {
+    let n = 0;
+    const timer = setTimeout(resolve, 25000);
+    for (const l of newLayers) {
+      l.on("load", () => { if (++n >= newLayers.length) { clearTimeout(timer); resolve(); } });
+    }
+  });
+  // Swap: retire the old frames, reveal frame 0, start the loop.
+  // Animation toggles opacity instead of adding/removing layers, so frames
+  // crossfade smoothly with zero blank flicker.
+  for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
+  if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
+  radarLayers = newLayers;
   radarFrameIndex = 0;
-  radarLayers[0].addTo(map);
+  radarLayers[0].setOpacity(0.75);
   radarAnimTimer = setInterval(() => {
-    try { map.removeLayer(radarLayers[radarFrameIndex]); } catch (e) {}
+    try { radarLayers[radarFrameIndex].setOpacity(0); } catch (e) {}
     radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
-    radarLayers[radarFrameIndex].addTo(map);
+    try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
   }, 900);
 }
 
@@ -1866,19 +1889,22 @@ const nextStartupOpener = cycler([
   "Weather In Real Time, coming online. Fetching the latest alerts now.",
 ]);
 const nextStartupClear = cycler([
-  "Weather In Real Time. All clear. No active weather alerts.",
-  "Weather In Real Time. Good news — not a single active alert right now.",
-  "Weather In Real Time. The country's quiet. No active alerts to report.",
-  "Weather In Real Time. All quiet nationwide. Nothing to warn about.",
-  "Weather In Real Time. Skies are calm — zero active alerts.",
-  "Weather In Real Time. Clean sweep — no alerts anywhere in the country.",
+  "Weather In Real Time. All clear. No active weather alerts — the sky's on its best behavior.",
+  "Weather In Real Time. Good news — not a single active alert right now. Nimbus is disappointed, I'm relieved.",
+  "Weather In Real Time. The country's quiet. No active alerts to report, so I'm just vibing with the radar.",
+  "Weather In Real Time. All quiet nationwide. Nothing to warn about — suspiciously peaceful, honestly.",
+  "Weather In Real Time. Skies are calm — zero active alerts. Enjoy it while it lasts, folks.",
+  "Weather In Real Time. Clean sweep — no alerts anywhere in the country. Even the clouds are behaving.",
+  "Weather In Real Time. Nothing popping off out there. Radar's clean, Nimbus is napping, life is good.",
+  "Weather In Real Time. All clear, coast to coast. I'll holler the second that changes — promise.",
 ]);
 const nextStartupAlerts = cycler([
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now.",
-  (n, r) => "Weather In Real Time. Heads up — " + n + (n === 1 ? " alert" : " alerts") + " on the board" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ".",
-  (n, r) => "Weather In Real Time. We've got " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " to get through.",
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", with " + r + (r === 1 ? " storm report" : " storm reports") + " in" : "") + ".",
-  (n, r) => "Weather In Real Time. Counting " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " as we speak.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now. Let's get into it.",
+  (n, r) => "Weather In Real Time. Heads up — " + n + (n === 1 ? " alert" : " alerts") + " on the board" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ". Buckle up.",
+  (n, r) => "Weather In Real Time. We've got " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " to get through. The sky's got jokes today.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", with " + r + (r === 1 ? " storm report" : " storm reports") + " in" : "") + ". Mother Nature's in a mood.",
+  (n, r) => "Weather In Real Time. Counting " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " as we speak. Stay sharp out there.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " demanding our attention" + (r ? ", plus " + r + (r === 1 ? " fresh storm report" : " fresh storm reports") : "") + ". Eyes up, y'all.",
 ]);
 function startupSummaryText() {
   const n = currentFeatures.length;
@@ -1899,6 +1925,10 @@ const nextSweep = cycler([
   "Time for a lap around the country's radar — let's see what the sky's doing.",
   "Radar's rolling. Taking the grand tour, coast to coast.",
   "Let's go radar surfing across the whole country and see what's popping.",
+  "Radar's hot and we're going coast to coast. Let's see what Mother Nature's up to.",
+  "Full radar sweep, top to bottom. If the sky's hiding something, we'll find it.",
+  "Let's ride the radar around the whole country — no storm gets past us.",
+  "Spinning the dish for a nationwide look. This never gets old.",
 ]);
 
 /* Shuffle an array in place. */
@@ -1918,8 +1948,9 @@ function chatterUpdate() {
   const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
   if (!feats.length) {
     // Quiet: personality lives here. Nimbus, asides, all-clear with character.
+    // Speaks up every few minutes so the quiet stretches feel alive.
     const now = Date.now();
-    if (now - lastAllClear > 15 * 60000) {
+    if (now - lastAllClear > 5 * 60000) {
       lastAllClear = now;
       // Pick two DIFFERENT bits and sometimes riff them back-to-back,
       // so the quiet stretches feel like a real presenter thinking aloud.
