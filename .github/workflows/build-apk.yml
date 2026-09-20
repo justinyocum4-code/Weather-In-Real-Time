@@ -447,14 +447,19 @@ jobs:
                       stopElPlayer();
                       elPlayer = new android.media.MediaPlayer();
                       elPlayer.setDataSource(path);
+                      final int gen = elGen;
+                      elPlayer.setOnPreparedListener(new android.media.MediaPlayer.OnPreparedListener() {
+                          @Override public void onPrepared(android.media.MediaPlayer mp) {
+                              try { if (gen == elGen) mp.start(); } catch (Exception ignored) {}
+                          }
+                      });
                       elPlayer.setOnCompletionListener(new android.media.MediaPlayer.OnCompletionListener() {
                           @Override public void onCompletion(android.media.MediaPlayer mp) { ttsDoneCallback(id); }
                       });
                       elPlayer.setOnErrorListener(new android.media.MediaPlayer.OnErrorListener() {
                           @Override public boolean onError(android.media.MediaPlayer mp, int what, int extra) { ttsDoneCallback(id); return true; }
                       });
-                      elPlayer.prepare();
-                      elPlayer.start();
+                      elPlayer.prepareAsync();
                   } catch (Exception e) { ttsDoneCallback(id); }
               }
               private String doTtsSpeak(String text) {
