@@ -161,11 +161,27 @@ jobs:
               private boolean ttsReady = false;
               private String pendingTts = null;
               private int ttsUtteranceSeq = 0;
-              private android.media.MediaPlayer elPlayer = null;
               private int elGen = 0; // invalidates in-flight ElevenLabs fetches on stop
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  // Crash recorder: if anything ever slips past the guards,
+                  // save a one-line reason so the app can report it on the
+                  // next launch instead of dying mysteriously.
+                  try {
+                      final android.content.SharedPreferences crashP = getSharedPreferences("weather_realtime", MODE_PRIVATE);
+                      final Thread.UncaughtExceptionHandler prevHandler = Thread.getDefaultUncaughtExceptionHandler();
+                      Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                          @Override public void uncaughtException(Thread t, Throwable e) {
+                              try {
+                                  String msg = String.valueOf(e);
+                                  if (msg.length() > 220) msg = msg.substring(0, 220);
+                                  crashP.edit().putString("last_crash", msg).apply();
+                              } catch (Throwable ignored) {}
+                              try { if (prevHandler != null) prevHandler.uncaughtException(t, e); } catch (Throwable ignored) {}
+                          }
+                      });
+                  } catch (Throwable ignored) {}
                   webView = new WebView(this);
                   webView.setBackgroundColor(0xFF000000); // never flash white on load/redraw
                   webView.getSettings().setJavaScriptEnabled(true);
@@ -173,6 +189,7 @@ jobs:
                   webView.getSettings().setAllowFileAccess(true);
                   webView.getSettings().setAllowFileAccessFromFileURLs(true);
                   webView.getSettings().setAllowUniversalAccessFromFileURLs(true);
+                  webView.getSettings().setMediaPlaybackRequiresUserGesture(false); // alert audio must play hands-free
                   webView.setWebViewClient(new WebViewClient());
                   webView.getSettings().setGeolocationEnabled(true);
                   webView.setWebChromeClient(new WebChromeClient() {
@@ -199,6 +216,15 @@ jobs:
                           try { return getSharedPreferences("weather_realtime", MODE_PRIVATE).getString(key, null); } catch (Exception e) { return null; }
                       }
                       @JavascriptInterface
+                      public String getLastCrash() {
+                          try {
+                              android.content.SharedPreferences p = getSharedPreferences("weather_realtime", MODE_PRIVATE);
+                              String c = p.getString("last_crash", null);
+                              if (c != null) p.edit().remove("last_crash").apply();
+                              return c == null ? "" : c;
+                          } catch (Exception e) { return ""; }
+                      }
+                      @JavascriptInterface
                       public void removeItem(String key) {
                           try { getSharedPreferences("weather_realtime", MODE_PRIVATE).edit().remove(key).commit(); } catch (Exception ignored) {}
                       }
@@ -217,15 +243,16 @@ jobs:
                           pendingTts = null;
                           elGen++;
                           try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
-                          stopElPlayer();
                       }
                   }, "LynxosTts");
-                  /* ElevenLabs cloud voice. The key + voice id are entered once
-                     in the app's Settings and live only in this phone's private
-                     storage. Speech is fetched as MP3 over HTTPS and played
-                     natively; on ANY failure (no network, bad key, monthly free
-                     minutes used up) the same utterance id falls back to the
-                     built-in Google voice so the presenter queue never stalls. */
+                  /* ElevenLabs cloud voice. The key + voice id live only in
+                     native code / this phone's private storage — they never
+                     reach the page. Speech is fetched as MP3 over HTTPS on a
+                     worker thread and handed to the page as a local file URL;
+                     the page plays it with an <audio> element. On ANY failure
+                     (no network, bad key, monthly free minutes used up) the
+                     page falls back to the built-in Google voice with the SAME
+                     utterance id, so the presenter queue never stalls. */
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public boolean hasCredentials() {
@@ -263,13 +290,12 @@ jobs:
                           try {
                               if (text == null || text.isEmpty()) return null;
                               elGen++;
-                              stopElPlayer();
                               try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
                               final String id = "el" + (++ttsUtteranceSeq);
                               final int gen = elGen;
                               final String t = text;
                               new Thread(new Runnable() { @Override public void run() {
-                                  try { elevenLabsSpeak(id, t, gen); } catch (Throwable th) { ttsDoneCallback(id); }
+                                  try { elevenLabsFetch(id, t, gen); } catch (Throwable th) { jsCall("window.__onElFail('" + id + "')"); }
                               } }).start();
                               return id;
                           } catch (Throwable t) { return null; }
@@ -277,7 +303,6 @@ jobs:
                       @JavascriptInterface
                       public void stop() {
                           elGen++;
-                          stopElPlayer();
                       }
                   }, "ElevenLabs");
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
@@ -361,10 +386,6 @@ jobs:
                       if (best != null) { try { tts.setVoice(best); } catch (Exception ignored) {} }
                   } catch (Exception ignored) {}
               }
-              private void stopElPlayer() {
-                  try { if (elPlayer != null) { try { elPlayer.stop(); } catch (Exception ignored) {} try { elPlayer.release(); } catch (Exception ignored) {} } } catch (Exception ignored) {}
-                  elPlayer = null;
-              }
               private String jsonQuote(String s) {
                   StringBuilder b = new StringBuilder("\"");
                   for (int i = 0; i < s.length(); i++) {
@@ -378,7 +399,7 @@ jobs:
                   }
                   return b.append("\"").toString();
               }
-              private void elevenLabsSpeak(final String id, final String text, final int gen) {
+              private void elevenLabsFetch(final String id, final String text, final int gen) {
                   boolean fetched = false;
                   String path = null;
                   try {
@@ -426,41 +447,21 @@ jobs:
                   } catch (Exception e) { fetched = false; }
                   if (gen != elGen) return; // stopped while fetching
                   if (fetched && path != null) {
-                      final String fp = path;
-                      runOnUiThread(new Runnable() { @Override public void run() {
-                          if (gen != elGen) return;
-                          playElevenLabs(id, fp);
-                      }});
+                      jsCall("window.__onElMp3('" + id + "'," + jsonQuote("file://" + path) + ")");
                   } else {
-                      // Fall back to the built-in voice with the SAME utterance id.
-                      runOnUiThread(new Runnable() { @Override public void run() {
-                          if (gen != elGen) return;
-                          try {
-                              if (ttsReady && tts != null) tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id);
-                              else ttsDoneCallback(id);
-                          } catch (Exception e2) { ttsDoneCallback(id); }
-                      }});
+                      jsCall("window.__onElFail('" + id + "')");
                   }
               }
-              private void playElevenLabs(final String id, final String path) {
+              private void jsCall(final String expr) {
                   try {
-                      stopElPlayer();
-                      elPlayer = new android.media.MediaPlayer();
-                      elPlayer.setDataSource(path);
-                      final int gen = elGen;
-                      elPlayer.setOnPreparedListener(new android.media.MediaPlayer.OnPreparedListener() {
-                          @Override public void onPrepared(android.media.MediaPlayer mp) {
-                              try { if (gen == elGen) mp.start(); } catch (Exception ignored) {}
+                      final WebView wv = webView;
+                      if (wv == null) return;
+                      wv.post(new Runnable() {
+                          @Override public void run() {
+                              try { wv.evaluateJavascript(expr, null); } catch (Exception ignored) {}
                           }
                       });
-                      elPlayer.setOnCompletionListener(new android.media.MediaPlayer.OnCompletionListener() {
-                          @Override public void onCompletion(android.media.MediaPlayer mp) { ttsDoneCallback(id); }
-                      });
-                      elPlayer.setOnErrorListener(new android.media.MediaPlayer.OnErrorListener() {
-                          @Override public boolean onError(android.media.MediaPlayer mp, int what, int extra) { ttsDoneCallback(id); return true; }
-                      });
-                      elPlayer.prepareAsync();
-                  } catch (Exception e) { ttsDoneCallback(id); }
+                  } catch (Exception ignored) {}
               }
               private String doTtsSpeak(String text) {
                   String id = "utt" + (++ttsUtteranceSeq);
@@ -492,7 +493,6 @@ jobs:
               @Override
               protected void onDestroy() {
                   if (tts != null) { try { tts.stop(); tts.shutdown(); } catch (Exception ignored) {} tts = null; }
-                  stopElPlayer();
                   super.onDestroy();
               }
               @Override
