@@ -688,7 +688,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .leaflet-container { background: #000; font-family: inherit; }
   /* YallBot-style high-tech glow on the radar tiles */
   .leaflet-tile-pane .radar-frame {
-    filter: saturate(1.9) brightness(1.25) contrast(1.12) drop-shadow(0 0 10px rgba(0,229,255,.55));
+    filter: saturate(2.1) brightness(1.3) contrast(1.15) drop-shadow(0 0 10px rgba(0,229,255,.55));
   }
   /* Purple/navy high-tech tint over the map */
   #radar-tint { position: absolute; inset: 0; z-index: 5; pointer-events: none;
@@ -823,8 +823,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.6.0";
-const WRT_VERSION_CODE = 40;
+const WRT_VERSION = "2.7.0";
+const WRT_VERSION_CODE = 42;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1244,7 +1244,7 @@ async function loadRadar() {
   stopRadarAnim();
   radarLayers = newLayers;
   radarFrameIndex = 0;
-  radarLayers[0].setOpacity(0.75);
+  radarLayers[0].setOpacity(0.85);
   startRadarAnim();
 }
 
@@ -1254,7 +1254,7 @@ function radarAnimTick() {
   if (!radarLayers.length) return;
   try { radarLayers[radarFrameIndex].setOpacity(0); } catch (e) {}
   radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
-  try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
+  try { radarLayers[radarFrameIndex].setOpacity(0.85); } catch (e) {}
 }
 function startRadarAnim() {
   if (radarAnimTimer) clearInterval(radarAnimTimer);
@@ -1281,7 +1281,7 @@ function smoothPan(lat, lon, zoom) {
       try { if (needZoom) map.setZoom(zoom, { animate: true }); } catch (e) {}
       panResumeTimer = setTimeout(() => {
         if (radarLayers.length) {
-          try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
+          try { radarLayers[radarFrameIndex].setOpacity(0.85); } catch (e) {}
           startRadarAnim();
         }
         panResumeTimer = null;
@@ -1331,7 +1331,8 @@ function scheduleTourNext() {
         banner.style.display = "block";
       }
     } catch (e) {}
-    presenter.add(buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
+    const why = whyThisAirs(tp);
+    presenter.add((why ? why + " " : "") + buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
   } catch (e) {}
 }
 
@@ -1387,10 +1388,18 @@ function scoreAlert(p) {
   else if (sev === "minor") s += 30;
   else s += 40;
   const ev = (p.event || "").toLowerCase();
-  if (ev.includes("tornado emergency")) s += 40;
+  if (ev.includes("tornado emergency")) s += 60;
   else if (ev.includes("tornado")) s += 15;
   if (ev.includes("flash flood")) s += 10;
+  if (/flash flood emergency/.test(ev)) s += 30;
   if (ev.includes("hurricane") || ev.includes("tropical storm")) s += 10;
+  // YallBot-style intensity: the weather service's own danger flags count big.
+  try {
+    const tags = (p.description || "").toLowerCase();
+    if (/particularly dangerous situation/.test(tags)) s += 40;
+    if (/destructive/.test(tags) && /thunderstorm/.test(ev)) s += 25;
+  } catch (e) {}
+  if (typeof tornadoThreat === "function" && tornadoThreat(p) === "a confirmed tornado") s += 25;
   const c = alertCentroid({ properties: p, geometry: p.geometry });
   if (c && userLoc) {
     const d = distanceMiles(userLoc.lat, userLoc.lon, c.lat, c.lon);
@@ -1416,6 +1425,39 @@ function severityColor(p) {
   if (sev === "severe") return "#ff8800";
   if (sev === "moderate") return "#ffdd00";
   return "#888888";
+}
+
+/* Nicknames for the listener — YallBot gives its regulars nicknames. Used
+   sparingly in check-ins and openers, never inside a warning. */
+const nextNickname = cycler([
+  "chief", "boss", "partner", "my friend", "slugger", "amigo", "pal", "cap'n",
+]);
+
+/* "Why you're hearing this" — YallBot's WHY THIS IS AIRING lower third,
+   spoken out loud. One short line BEFORE the alert, never inside the
+   warning facts. Returns "" when there's nothing special to say. */
+function whyThisAirs(p) {
+  try {
+    const ev = (p.event || "").toLowerCase();
+    const desc = (p.description || "").toLowerCase();
+    if (/tornado/.test(ev) && typeof tornadoThreat === "function" &&
+        tornadoThreat(p) === "a confirmed tornado")
+      return "Why you're hearing this, " + nextNickname() + ": a confirmed tornado jumps every queue I've got.";
+    if (/tornado/.test(ev))
+      return "Why you're hearing this: tornado warnings go straight to the top. No waiting in line.";
+    if (/flash flood emergency/.test(ev) || /particularly dangerous situation/.test(desc))
+      return "Why you're hearing this: the weather service flagged this one as particularly dangerous.";
+    if (userLoc) {
+      const c = alertCentroid({ properties: p, geometry: p.geometry });
+      if (c) {
+        const d = Math.round(distanceMiles(userLoc.lat, userLoc.lon, c.lat, c.lon));
+        if (d < 150) return "Why you're hearing this: this one's about " + d + " miles from you, " + nextNickname() + ".";
+      }
+    }
+    if (/extreme|severe/.test((p.severity || "").toLowerCase()))
+      return "Why you're hearing this: it's the most severe thing on the board right now.";
+  } catch (e) {}
+  return "";
 }
 
 /* Deal lines from a shuffled deck — never the same line twice until the whole
@@ -1477,6 +1519,18 @@ const nextOpener = cycler([
   "Gather round,",
   "Storm tracker's log,",
   "Weather desk update,",
+  "Y'all,",
+  "Okay, real talk,",
+  "Listen up,",
+  "No sugarcoating this one,",
+  "Straight from the weather desk,",
+  "Hot off the radar,",
+  "Your weather-obsessed friend here,",
+  "Me again, with sky news,",
+  "The sky's up to something,",
+  "Plot twist from the atmosphere,",
+  "Your friendly neighborhood weather nerd here,",
+  "Breaking from the radar room,",
 ]);
 
 /* Sassy asides — the YallBot flavor. Dropped in sparingly, kept light so the
@@ -1706,6 +1760,21 @@ const calmAside = cycler([
   "Nimbus is snoring so loud the radar picked it up as precipitation.",
   "Breaking: nothing is happening. More at eleven. Actually, less at eleven.",
   "I polished the radar dish out of boredom. You're welcome, science.",
+]);
+
+/* Nimbus, the four-legged co-presenter — YallBot has an AI dog named Nimbus,
+   and so do we. Short sidekick bits for check-ins and quiet stretches. */
+const nextNimbus = cycler([
+  "Nimbus is on radar duty. He's very professional. Mostly.",
+  "Nimbus sniffed the data feed. All clear, he says. I trust the nose.",
+  "Sidekick update: Nimbus is napping on the warm receiver. Morale is high.",
+  "Nimbus just did a perimeter check of the studio. No storms found. Good dog.",
+  "Nimbus rates this quiet stretch five out of five naps.",
+  "Nimbus is chewing the corner of the national map. The Midwest is now a chew toy.",
+  "My four-legged co-presenter Nimbus says the radar looks boring. He's not wrong.",
+  "Nimbus tried to chase a cloud on the satellite loop. He's an optimist.",
+  "Nimbus just barked at the radar. False alarm — it was a smudge. We're working on his training.",
+  "Co-presenter Nimbus is demanding snacks. I told him he only eats upstream data. He ate it anyway.",
 ]);
 
 /* Clumsy presenter bits — lovable goof energy. Calm-weather chatter ONLY,
@@ -1990,7 +2059,7 @@ function chatterUpdate() {
       lastAllClear = now;
       // Pick two DIFFERENT bits and sometimes riff them back-to-back,
       // so the quiet stretches feel like a real presenter thinking aloud.
-      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear()];
+      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear(), nextNimbus()];
       const first = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
       queueSpeech(first, 60);
       if (Math.random() < 0.3) {
@@ -2048,6 +2117,10 @@ const nextCheckin = cycler([
   "Still in the crosshairs.",
   "Keeping it on the front burner.",
   "Back on this one. Nimbus sends his regards.",
+  "Still on this one, chief.",
+  "Back to this storm, boss.",
+  "Keeping tabs on this one, partner.",
+  "This one's still mine, pal. Not going anywhere.",
 ]);
 function chatterMode() { return store.get("chatter", "chatty"); }
 
@@ -2517,11 +2590,19 @@ function onNewAlert(f) {
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
   const c = alertCentroid(f);
   const move = c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null;
-  if (/tornado/i.test(p.event || "")) {
-    // Tornado warnings interrupt everything: map moves first, then it speaks.
-    presenter.urgent(buildAnnouncement(p), move);
+  const why = whyThisAirs(p);
+  const text = (why ? why + " " : "") + buildAnnouncement(p);
+  const evLow = (p.event || "").toLowerCase();
+  const descLow = (p.description || "").toLowerCase();
+  const isEmergency = /tornado/i.test(p.event || "") ||
+    /flash flood emergency/.test(evLow) ||
+    /particularly dangerous situation/.test(descLow);
+  if (isEmergency) {
+    // Tornadoes and weather-service-flagged emergencies interrupt everything:
+    // map moves first, then it speaks.
+    presenter.urgent(text, move);
   } else {
-    queueSpeech(buildAnnouncement(p), score, move);
+    queueSpeech(text, score, move);
   }
 }
 
