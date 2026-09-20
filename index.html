@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.1.0";
-const WRT_VERSION_CODE = 3;
+const WRT_VERSION = "1.1.1";
+const WRT_VERSION_CODE = 4;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -440,6 +440,18 @@ function recapAlerts() {
   queueSpeech(text, 999);
 }
 
+/* Startup: always speak on launch so the user knows the app is alive. */
+function announceStartup() {
+  const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+  if (!feats.length) {
+    queueSpeech("Weather In Real Time. All clear. No active weather alerts in the United States right now.", 999);
+  } else {
+    const n = feats.length;
+    queueSpeech("Weather In Real Time. " + n + (n === 1 ? " active alert. " : " active alerts. ") +
+      buildAnnouncement(feats[0].properties || {}), 999);
+  }
+}
+
 /* Chatter: keep the voice busy with periodic updates. */
 let chatterIndex = 0;
 let lastAllClear = 0;
@@ -669,17 +681,14 @@ document.getElementById("btn-testvoice").addEventListener("click", () => {
 
 document.getElementById("btn-enable-loc").addEventListener("click", () => {
   requestLocation((ok) => {
-    queueSpeech(ok
-      ? "Location set. Monitoring the entire United States."
-      : "Location unavailable. Monitoring the entire United States.", 999);
-    pollAlerts();
+    queueSpeech(ok ? "Location set." : "Location unavailable.", 999);
+    pollAlerts().then(() => announceStartup());
   });
 });
 document.getElementById("btn-skip-loc").addEventListener("click", () => {
   document.getElementById("welcome").hidden = true;
   store.set("welcomed", "1");
-  queueSpeech("Monitoring the entire United States.", 999);
-  pollAlerts();
+  pollAlerts().then(() => announceStartup());
 });
 
 /* Clock */
@@ -704,7 +713,7 @@ if (store.get("welcomed", "") !== "1") {
   document.getElementById("welcome").hidden = false;
   setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
 } else {
-  pollAlerts();
+  pollAlerts().then(() => announceStartup());
 }
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
