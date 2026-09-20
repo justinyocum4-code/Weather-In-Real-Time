@@ -152,8 +152,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.0";
-const WRT_VERSION_CODE = 15;
+const WRT_VERSION = "2.0.1";
+const WRT_VERSION_CODE = 16;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -493,23 +493,22 @@ function panToAlert(p, immediate) {
   }
 }
 
-/* The map always follows the most severe active alert, even in quiet hours
-   or when the voice is off. Runs after every poll. */
-let viewedAlertId = null;
-function followTopAlert() {
+/* Visual tour: the map continuously cycles through the most important alerts,
+   so the radar never sits in one spot. Syncs with the threat banner. */
+let tourIndex = 0;
+function mapTour() {
   if (!map || !currentFeatures.length) return;
   try {
-    const feats = [...currentFeatures].sort((a, b) =>
-      scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
-    const top = feats[0];
-    if (!top) return;
-    const id = top.id || (top.properties || {}).id;
-    if (id && id === viewedAlertId) return;
-    viewedAlertId = id;
-    const c = alertCentroid(top);
-    // Threat banner — like YallBot's stream title.
+    const feats = [...currentFeatures]
+      .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
+      .slice(0, 12);
+    if (!feats.length) return;
+    const f = feats[tourIndex % feats.length];
+    tourIndex++;
+    const c = alertCentroid(f);
+    // Threat banner follows the tour — like YallBot's stream title.
     try {
-      const tp = top.properties || {};
+      const tp = f.properties || {};
       const banner = document.getElementById("threat-banner");
       if (banner) {
         const area = formatArea(tp);
@@ -518,11 +517,8 @@ function followTopAlert() {
       }
     } catch (e) {}
     if (!c) return;
-    try {
-      map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
-    } catch (e) {
-      try { map.setView([c.lat, c.lon], 8); } catch (e2) {}
-    }
+    try { map.flyTo([c.lat, c.lon], 7, { duration: 2.5 }); }
+    catch (e) { try { map.setView([c.lat, c.lon], 7); } catch (e2) {} }
   } catch (e) {}
 }
 
@@ -690,6 +686,30 @@ function formatArea(p) {
   return chunks.join(". ");
 }
 
+/* Safety reminders with variety — never the same line twice in a row. */
+const TORNADO_SAFETY = [
+  "If you're anywhere near there, get to the lowest floor and away from windows.",
+  "Time to take shelter, folks. Lowest floor, away from windows.",
+  "Get somewhere safe now. Interior room, lowest floor, no windows.",
+];
+const FLOOD_SAFETY = [
+  "And remember, turn around don't drown, never try driving through flooded roads.",
+  "Seriously, don't drive through flood water. It takes less than you think to sweep a car away.",
+  "Flood water's no joke. If the road's under water, find another way around.",
+  "Just a reminder, six inches of moving water can knock you down. Stay out of it.",
+];
+let tornadoSafetyIdx = 0;
+let floodSafetyIdx = 0;
+function nextTornadoSafety() {
+  const s = TORNADO_SAFETY[tornadoSafetyIdx % TORNADO_SAFETY.length];
+  tornadoSafetyIdx++;
+  return s;
+}
+function nextFloodSafety() {
+  const s = FLOOD_SAFETY[floodSafetyIdx % FLOOD_SAFETY.length];
+  floodSafetyIdx++;
+  return s;
+}
 /* Story-style transitions to keep it flowing like someone telling you what's happening. */
 const STORY_BITS = [
   "Here's what's going on.",
@@ -698,14 +718,34 @@ const STORY_BITS = [
 ];
 let storyIndex = 0;
 
+/* Colorful ways to say the event name — gives the voice character. */
+function eventColorful(event) {
+  if (/tornado warning/i.test(event)) {
+    const v = ["a tornado warning", "a confirmed tornado situation brewing", "tornado warning, the big one"];
+    return v[Math.floor(Math.random() * v.length)];
+  }
+  if (/tornado watch/i.test(event)) return "a tornado watch";
+  if (/severe thunderstorm warning/i.test(event)) {
+    const v = ["a severe thunderstorm warning", "a nasty severe storm warning"];
+    return v[Math.floor(Math.random() * v.length)];
+  }
+  if (/flash flood warning/i.test(event)) {
+    const v = ["a flash flood warning", "a flash flood situation"];
+    return v[Math.floor(Math.random() * v.length)];
+  }
+  return event;
+}
+
 function buildAnnouncement(p) {
   const event = (p.event || "Weather alert").toLowerCase();
   const area = formatArea(p);
-  // Story opening — varied, personal.
+  // Story opening — varied, personal, with character.
+  const eventColor = eventColorful(event);
   const openers = [
-    nextOpener() + " we've got " + articleFor(event) + " " + event,
-    nextOpener() + " there's " + articleFor(event) + " " + event + " out there",
-    nextOpener() + " " + STORY_BITS[storyIndex % STORY_BITS.length] + " We've got " + articleFor(event) + " " + event,
+    nextOpener() + " we've got " + articleFor(event) + " " + eventColor,
+    nextOpener() + " there's " + articleFor(event) + " " + eventColor + " out there",
+    nextOpener() + " " + STORY_BITS[storyIndex % STORY_BITS.length] + " We've got " + articleFor(event) + " " + eventColor,
+    nextOpener() + " heads up, " + eventColor + " on the board",
   ];
   storyIndex++;
   let text = openers[Math.floor(Math.random() * openers.length)];
@@ -725,11 +765,11 @@ function buildAnnouncement(p) {
     if (report.length > 150) report = report.slice(0, 150) + ".";
     text += "Now, " + report.charAt(0).toLowerCase() + report.slice(1) + " ";
   }
-  // Stakes: what to do, like a friend would say it.
+  // Stakes: what to do, like a friend would say it. Rotates, and not every time.
   if (/tornado/i.test(event)) {
-    text += "If you're anywhere near there, get to the lowest floor and away from windows. ";
+    if (Math.random() < 0.6) text += nextTornadoSafety() + " ";
   } else if (/flash flood/i.test(event)) {
-    text += "And remember, turn around don't drown, never try driving through flooded roads. ";
+    if (Math.random() < 0.5) text += nextFloodSafety() + " ";
   }
   // Occasional sassy aside — YallBot flavor, not every time.
   if (Math.random() < 0.25) text += nextAside() + " ";
@@ -826,7 +866,7 @@ async function pollAlerts() {
     const features = data.features || [];
     currentFeatures = features;
     processAlerts(features);
-    followTopAlert();
+    mapTour();
     drawAlertPolygons(features);
     document.getElementById("alert-count").textContent = features.length + (features.length === 1 ? " alert" : " alerts");
   } catch (e) {
@@ -1225,6 +1265,7 @@ if (store.get("welcomed", "") !== "1") {
 }
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
+setInterval(mapTour, 45000); // keep the radar moving between top threats
 setInterval(pollSpcOutlook, 30 * 60 * 1000); // SPC outlooks update a few times daily
 setInterval(wisUpdate, 30 * 60 * 1000); // national intensity score readout
 document.addEventListener("visibilitychange", () => {
