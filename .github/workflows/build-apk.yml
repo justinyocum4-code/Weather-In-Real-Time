@@ -87,6 +87,13 @@ jobs:
               id 'com.android.application' version '8.5.2' apply false
           }
           EOF
+          # The Kokoro voice model roughly doubles the packaged assets, so the
+          # default Gradle heap is no longer enough (run #78 died with
+          # "Java heap space" in :app:collectReleaseDependencies after the
+          # Kokoro Java code compiled cleanly). GitHub runners have 16GB RAM.
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g
+          EOF
           cat > app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
