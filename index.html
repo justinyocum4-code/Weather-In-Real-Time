@@ -815,6 +815,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Michael's voice status</span>
       <span id="voice-status" style="font-size:14px;color:#ffd97f;">Checking…</span>
     </div>
+    <div class="setting-row">
+      <span>Voice detail</span>
+      <span id="voice-detail" style="font-size:14px;color:#999;">—</span>
+    </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
 
@@ -832,8 +836,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.4";
-const WRT_VERSION_CODE = 35;
+const WRT_VERSION = "2.5.5";
+const WRT_VERSION_CODE = 36;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -2585,6 +2589,14 @@ if (store.get("welcomed", "") !== "1") {
 function updateVoiceStatus() {
   const el = document.getElementById("voice-status");
   if (!el) return;
+  try {
+    const det = document.getElementById("voice-detail");
+    if (det && typeof KokoroVoice !== "undefined" && KokoroVoice.getLastSpeakInfo) {
+      const info = KokoroVoice.getLastSpeakInfo() || "";
+      det.textContent = info || "—";
+      det.style.color = /FAILED/.test(info) ? "#ff7f7f" : "#999";
+    }
+  } catch (e) {}
   try {
     if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady) {
       if (KokoroVoice.isReady()) { el.textContent = "Ready"; el.style.color = "#7fd67f"; return; }
