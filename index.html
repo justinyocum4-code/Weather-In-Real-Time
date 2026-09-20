@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.5.0";
-const WRT_VERSION_CODE = 9;
+const WRT_VERSION = "1.6.0";
+const WRT_VERSION_CODE = 10;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -331,7 +331,57 @@ function initMap() {
   document.getElementById("radar-map").setAttribute("tabindex", "-1");
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 12 }).addTo(map);
   loadRadar();
+  loadStormCells();
   setInterval(loadRadar, 5 * 60 * 1000);
+  setInterval(loadStormCells, 2 * 60 * 1000);
+}
+
+/* Storm cells: NEXRAD-detected rotation, hail, and tornado signatures.
+   This is the high-tech layer — shows what's happening inside the storms. */
+let stormCellLayer = null;
+const seenTvsIds = new Set();
+
+async function loadStormCells() {
+  if (!map) return;
+  try {
+    const r = await fetch("https://mesonet.agron.iastate.edu/geojson/nexrad_attr.py");
+    if (!r.ok) return;
+    const data = await r.json();
+    const feats = data.features || [];
+    if (stormCellLayer) { try { map.removeLayer(stormCellLayer); } catch (e) {} }
+    stormCellLayer = L.layerGroup();
+    let rotCount = 0;
+    for (const f of feats) {
+      const p = f.properties || {};
+      const coords = f.geometry && f.geometry.coordinates;
+      if (!coords || coords.length < 2) continue;
+      const lat = coords[1], lon = coords[0];
+      const tvs = p.tvs && p.tvs !== "NONE";
+      const meso = p.meso && p.meso !== "NONE";
+      if (tvs) {
+        // Tornado vortex signature — red pulsing marker, always announce.
+        const m = L.circleMarker([lat, lon], {
+          radius: 12, color: "#ff0000", weight: 3, fillColor: "#ff0000", fillOpacity: 0.5
+        }).addTo(stormCellLayer);
+        m.bindTooltip("TORNADO SIGNATURE", { permanent: false });
+        const id = "tvs-" + (p.storm_id || "") + "-" + (p.valid || "");
+        if (!seenTvsIds.has(id)) {
+          seenTvsIds.add(id);
+          queueSpeech("Heads up, radar is showing a possible tornado signature. " +
+            "This is rotation the radar is detecting right now, not a confirmed tornado. " +
+            "Stay weather aware.", 90);
+          map.flyTo([lat, lon], 8, { duration: 2.5 });
+        }
+      } else if (meso) {
+        // Rotating storm — orange marker.
+        rotCount++;
+        L.circleMarker([lat, lon], {
+          radius: 7, color: "#ff8800", weight: 2, fillColor: "#ff8800", fillOpacity: 0.4
+        }).addTo(stormCellLayer);
+      }
+    }
+    stormCellLayer.addTo(map);
+  } catch (e) {}
 }
 
 let radarFrameIndex = 0;
