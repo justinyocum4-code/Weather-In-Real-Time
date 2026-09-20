@@ -116,6 +116,9 @@ jobs:
                   // On-device AI voice (Kokoro via sherpa-onnx). Official build, re-published by JitPack.
                   // v1.12.40 already includes Kokoro TTS support (added in sherpa-onnx 1.10.42).
                   implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.40'
+                  // The voice engine is written in Kotlin; without the stdlib it crashes
+                  // on startup with NoClassDefFoundError (kotlin/jvm/internal/Intrinsics).
+                  implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
               }
           }
           EOF
