@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.8.0";
-const WRT_VERSION_CODE = 13;
+const WRT_VERSION = "1.9.0";
+const WRT_VERSION_CODE = 14;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -444,7 +444,34 @@ function panToAlert(p, immediate) {
   // between moves so it doesn't yank the map constantly.
   if (!immediate && now - lastPan < 8000) return;
   lastPan = now;
-  map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
+  try {
+    map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
+  } catch (e) {
+    try { map.setView([c.lat, c.lon], 8); } catch (e2) {}
+  }
+}
+
+/* The map always follows the most severe active alert, even in quiet hours
+   or when the voice is off. Runs after every poll. */
+let viewedAlertId = null;
+function followTopAlert() {
+  if (!map || !currentFeatures.length) return;
+  try {
+    const feats = [...currentFeatures].sort((a, b) =>
+      scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+    const top = feats[0];
+    if (!top) return;
+    const id = top.id || (top.properties || {}).id;
+    if (id && id === viewedAlertId) return;
+    viewedAlertId = id;
+    const c = alertCentroid(top);
+    if (!c) return;
+    try {
+      map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
+    } catch (e) {
+      try { map.setView([c.lat, c.lon], 8); } catch (e2) {}
+    }
+  } catch (e) {}
 }
 
 /* ============ Alert geometry ============ */
@@ -725,6 +752,7 @@ async function pollAlerts() {
     const features = data.features || [];
     currentFeatures = features;
     processAlerts(features);
+    followTopAlert();
     document.getElementById("alert-count").textContent = features.length + (features.length === 1 ? " alert" : " alerts");
   } catch (e) {
     document.getElementById("alert-count").textContent = "feed offline";
@@ -756,6 +784,40 @@ async function pollStormReports() {
   } catch (e) {}
 }
 
+/* Storm reports with personality — like a friend telling you what just came in,
+   not a dispatcher reading a log. */
+const REPORT_VIBES = [
+  "Oh, we've got a report coming in.",
+  "Okay, listen to this one.",
+  "New report just landed.",
+  "Wow, okay, check this out.",
+  " Somebody just called this in.",
+];
+let vibeIndex = 0;
+function nextVibe() {
+  const v = REPORT_VIBES[vibeIndex % REPORT_VIBES.length];
+  vibeIndex++;
+  return v;
+}
+
+/* A human reaction to the report — gives it character. */
+function reportReaction(type, mag) {
+  const t = (type || "").toLowerCase();
+  const m = (mag || "").toLowerCase();
+  if (/tornado/.test(t)) return "This is the real deal, folks.";
+  if (/funnel/.test(t)) return "That's how tornadoes get started.";
+  const inches = parseFloat(m);
+  if (/hail/.test(t) && inches >= 1.75) return "That's gonna do some damage.";
+  if (/hail/.test(t) && inches >= 1) return "That's big enough to dent cars.";
+  if (/hail/.test(t)) return "Even small hail can mess up a garden.";
+  if (/wind|gust/.test(t) && inches >= 70) return "That's hurricane-force, no joke.";
+  if (/wind|gust/.test(t)) return "Strong enough to knock things around.";
+  if (/flood|flash/.test(t)) return "Water is no joke, stay out of it.";
+  if (/snow|ice|blizzard/.test(t)) return "Bundle up out there.";
+  if (/fire|smoke/.test(t)) return "Stay clear of that area.";
+  return null;
+}
+
 function onNewStormReport(f) {
   const p = f.properties || {};
   const type = p.type || "weather";
@@ -764,9 +826,12 @@ function onNewStormReport(f) {
   const source = p.source || "a spotter";
   const mag = p.magnitude ? ", " + p.magnitude : "";
   const remark = p.remark ? " " + p.remark : "";
-  let text = nextOpener() + " we've got a storm report coming in. " + type + mag + (city ? " over in " + city : "") + (state ? ", " + state : "") +
+  let text = nextOpener() + " " + nextVibe() + " " + type + mag +
+    (city ? " over in " + city : "") + (state ? ", " + state : "") +
     ". This one's from " + source + "." + remark;
-  if (text.length > 350) text = text.slice(0, 350) + ".";
+  const reaction = reportReaction(type, p.magnitude || "");
+  if (reaction) text += " " + reaction;
+  if (text.length > 400) text = text.slice(0, 400) + ".";
   queueSpeech(text, 75);
   // Move the map to the report location right away.
   panToAlert(f, true);
