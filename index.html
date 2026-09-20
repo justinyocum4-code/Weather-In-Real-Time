@@ -823,8 +823,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.8.0";
-const WRT_VERSION_CODE = 43;
+const WRT_VERSION = "2.9.0";
+const WRT_VERSION_CODE = 44;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1130,6 +1130,48 @@ function drawAlertPolygons(features) {
 let stormCellLayer = null;
 const seenTvsIds = new Set();
 
+/* Point-in-polygon helpers, so tornado signatures can be located inside
+   warning areas ("in Dallas County, Texas"). */
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    if (((yi > lat) !== (yj > lat)) &&
+        (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+function pointInGeom(lon, lat, geom) {
+  if (!geom || !geom.coordinates) return false;
+  try {
+    if (geom.type === "Polygon") return pointInRing(lon, lat, geom.coordinates[0]);
+    if (geom.type === "MultiPolygon")
+      return geom.coordinates.some(function (poly) { return pointInRing(lon, lat, poly[0]); });
+  } catch (e) {}
+  return false;
+}
+function compassDir(lat1, lon1, lat2, lon2) {
+  const brng = Math.atan2(lon2 - lon1, lat2 - lat1) * 180 / Math.PI;
+  const dirs = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+  return dirs[Math.round(((brng + 360) % 360) / 45) % 8];
+}
+/* Where is this tornado signature? Prefer the warned county/state, otherwise
+   distance and direction from the listener. Returns "" if unknown. */
+function describeTvsLocation(lat, lon) {
+  try {
+    for (const f of alertFeatures) {
+      const p = f.properties || {};
+      if (p.areaDesc && pointInGeom(lon, lat, f.geometry)) return "in " + p.areaDesc;
+    }
+  } catch (e) {}
+  if (userLoc) {
+    const d = Math.round(distanceMiles(userLoc.lat, userLoc.lon, lat, lon));
+    return "about " + d + " miles " + compassDir(userLoc.lat, userLoc.lon, lat, lon) + " of you";
+  }
+  return "";
+}
+
 async function loadStormCells() {
   if (!map) return;
   try {
@@ -1156,7 +1198,10 @@ async function loadStormCells() {
         const id = "tvs-" + (p.storm_id || "") + "-" + (p.valid || "");
         if (!seenTvsIds.has(id)) {
           seenTvsIds.add(id);
-          queueSpeech(nextTvsLine(), 90);
+          let tvsLine = nextTvsLine();
+          const where = describeTvsLocation(lat, lon);
+          if (where) tvsLine += " This rotation is " + where + ".";
+          queueSpeech(tvsLine, 90);
           smoothPan(lat, lon, 8);
         }
       } else if (meso) {
