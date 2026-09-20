@@ -811,7 +811,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Voice</span>
       <span style="font-size:14px;color:#7fd67f;">Built-in AI voice — always on, works offline</span>
     </div>
-    <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by RainViewer.</p>
+    <div class="setting-row">
+      <span>Michael's voice status</span>
+      <span id="voice-status" style="font-size:14px;color:#ffd97f;">Checking…</span>
+    </div>
+    <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
 
   <div id="welcome" hidden>
@@ -828,8 +832,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.1";
-const WRT_VERSION_CODE = 32;
+const WRT_VERSION = "2.5.2";
+const WRT_VERSION_CODE = 33;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -866,38 +870,6 @@ const voice = {
   lastSpokenScore: 0
 };
 
-/* Pick the most natural-sounding English voice on the device. */
-let bestVoice = null;
-function pickBestVoice() {
-  try {
-    if (!("speechSynthesis" in window)) return;
-    const voices = speechSynthesis.getVoices();
-    if (!voices.length) return;
-    const en = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith("en"));
-    const pool = en.length ? en : voices;
-    const score = (v) => {
-      const n = (v.name + " " + (v.voiceURI || "")).toLowerCase();
-      let s = 0;
-      if (n.includes("natural")) s += 50;
-      if (n.includes("neural")) s += 50;
-      if (n.includes("premium")) s += 30;
-      if (n.includes("enhanced")) s += 30;
-      if (n.includes("google")) s += 20;
-      if (n.includes("samantha") || n.includes("alex")) s += 20;
-      if (v.localService === false) s += 10; // network voices are usually better
-      if (n.includes("compact") || n.includes("robot")) s -= 50;
-      return s;
-    };
-    pool.sort((a, b) => score(b) - score(a));
-    bestVoice = pool[0];
-  } catch (e) {}
-}
-try {
-  if ("speechSynthesis" in window) {
-    pickBestVoice();
-    speechSynthesis.onvoiceschanged = pickBestVoice;
-  }
-} catch (e) {}
 
 /* State abbreviations -> full names, so the voice says "Texas" not "T X". */
 const STATE_NAMES = {
@@ -917,10 +889,11 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
-/* The voice, forever: Kokoro, the on-device AI voice. Unlimited,
+/* The voice, forever: Kokoro (Michael), the on-device AI voice. Unlimited,
    offline, no key, no quota — it simply speaks. It reports completion
-   with the id its native speak() returned. The built-in device voice is
-   an emergency backup if Kokoro isn't warmed up yet. */
+   with the id its native speak() returned. There is no backup voice:
+   until Michael is ready, utterances are skipped silently and the
+   announce bar carries the text instead. */
 let utteranceSeq = 0;
 const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
@@ -936,36 +909,15 @@ function ttsSpeak(text) {
       if (pid) { pvIdMap[pid] = id; return id; }
     }
   } catch (e) {}
-  try {
-    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
-      const nid = LynxosTts.speak(text);
-      if (nid) pvIdMap[nid] = id;
-      else window.__onTtsDone(id);
-      return id;
-    }
-  } catch (e) {}
-  try {
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 0.7;
-      if (bestVoice) u.voice = bestVoice;
-      u.onend = () => window.__onTtsDone(id);
-      u.onerror = () => window.__onTtsDone(id);
-      speechSynthesis.speak(u);
-      return id;
-    }
-  } catch (e) {}
-  window.__onTtsDone(id);
-  return id;
+  // Michael-only: no fallback voices. Return null so the presenter skips
+  // this utterance without arming the fallback timer.
+  return null;
 }
 
 
 
 function ttsStop() {
   try { if (typeof KokoroVoice !== "undefined" && KokoroVoice.stop) KokoroVoice.stop(); } catch (e) {}
-  try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
-  try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
 }
 
 /* ============ Presenter: ONE queue drives the map AND the voice together.
@@ -1013,11 +965,13 @@ const presenter = {
     const item = this.queue.shift();
     const doSpeak = () => {
       const id = ttsSpeak(item.text);
+      if (!id) { this.next(); return; } // voice not ready: skip, no stray timer
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
-      // finished-callback never arrives. Kokoro synthesizes on-device in
-      // a few seconds, so this timer only needs to cover playback.
-      const ms = Math.min(120000, Math.max(10000, item.text.length * 85));
+      // finished-callback never arrives. Covers on-device synthesis time
+      // plus playback with a wide margin, so long reports are never
+      // cut off mid-sentence.
+      const ms = Math.min(240000, Math.max(20000, item.text.length * 200));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
     };
@@ -1220,32 +1174,66 @@ async function loadStormCells() {
 let radarFrameIndex = 0;
 let radarAnimTimer = null;
 
+/* IEM probe, cached for the session: is the real NEXRAD tile service up? */
+let iemOkPromise = null;
+function iemReachable() {
+  if (!iemOkPromise) {
+    iemOkPromise = new Promise((resolve) => {
+      try {
+        const img = new Image();
+        const to = setTimeout(() => resolve(false), 9000);
+        img.onload = () => { clearTimeout(to); resolve(true); };
+        img.onerror = () => { clearTimeout(to); resolve(false); };
+        img.src = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/4/3/5.png?probe=" + Date.now();
+      } catch (e) { resolve(false); }
+    });
+  }
+  return iemOkPromise;
+}
+
 async function loadRadar() {
   if (!map) return;
-  try {
-    const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
-    const data = await r.json();
-    const past = data.radar && data.radar.past;
-    if (!past || !past.length) return;
-    // Clear old frames.
-    for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
-    if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
-    radarLayers = [];
-    // Build one tile layer per frame (last 8 frames) and cycle them.
-    const frames = past.slice(-8);
-    for (const f of frames) {
-      const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/5/1_1.png"; // 5 = NEXRAD Level III palette (pro look)
-      radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10, className: "radar-frame" }));
+  // Clear old frames.
+  for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
+  if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
+  radarLayers = [];
+  // Cache-buster per refresh so the "latest" mosaic never sticks stale.
+  const epochMin = Math.floor(Date.now() / 60000);
+  if (await iemReachable()) {
+    // Iowa Environmental Mesonet: the real NWS NEXRAD Level-III base
+    // reflectivity mosaic — the TV-news look. One layer per 5-minute
+    // step gives a one-hour animation loop. Free, no key.
+    const base = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913";
+    const steps = [""];
+    for (let m = 5; m <= 55; m += 5) steps.push("-m" + (m < 10 ? "0" : "") + m + "m");
+    for (const s of steps) {
+      radarLayers.push(L.tileLayer(base + s + "/{z}/{x}/{y}.png?t=" + epochMin, {
+        opacity: 0.75, zIndex: 10, className: "radar-frame",
+        attribution: "Radar: Iowa Environmental Mesonet / NOAA NEXRAD"
+      }));
     }
-    if (!radarLayers.length) return;
-    radarFrameIndex = 0;
-    radarLayers[0].addTo(map);
-    radarAnimTimer = setInterval(() => {
-      try { map.removeLayer(radarLayers[radarFrameIndex]); } catch (e) {}
-      radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
-      radarLayers[radarFrameIndex].addTo(map);
-    }, 900);
-  } catch (e) {}
+  } else {
+    // Fallback: RainViewer, if the IEM tiles are unreachable.
+    try {
+      const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+      const data = await r.json();
+      const past = data.radar && data.radar.past;
+      if (!past || !past.length) return;
+      const frames = past.slice(-8);
+      for (const f of frames) {
+        const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/5/1_1.png"; // 5 = NEXRAD Level III palette
+        radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10, className: "radar-frame" }));
+      }
+    } catch (e) { return; }
+  }
+  if (!radarLayers.length) return;
+  radarFrameIndex = 0;
+  radarLayers[0].addTo(map);
+  radarAnimTimer = setInterval(() => {
+    try { map.removeLayer(radarLayers[radarFrameIndex]); } catch (e) {}
+    radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
+    radarLayers[radarFrameIndex].addTo(map);
+  }, 900);
 }
 
 let lastPan = 0;
@@ -1428,6 +1416,14 @@ const nextOpener = cycler([
   "Heads on a swivel,",
   "Story's developing,",
   "Oh boy, here comes another one,",
+  "Y'all ready for this,",
+  "Coming in hot,",
+  "Eyes up,",
+  "No rest for the wicked,",
+  "The sky's got jokes today,",
+  "Sit tight,",
+  "Gather round,",
+  "Storm tracker's log,",
   "Weather desk update,",
 ]);
 
@@ -1451,6 +1447,12 @@ const nextAside = cycler([
   "Rude. Absolutely rude weather.",
   "I'd cancel my outdoor plans if I were you. Just saying.",
   "Mother Nature skipped her coffee this morning.",
+  "Nimbus just knocked my coffee over. Anyway,",
+  "If the sky had a customer service line, I'd be on hold,",
+  "The jet stream's doing parkour again,",
+  "Somewhere, a meteorologist just spit out their coffee,",
+  "I'd like to speak to the atmosphere's manager,",
+  "Bold of the sky to pull this on a weekend,",
   "Drama. Pure atmospheric drama.",
 ]);
 
@@ -1863,6 +1865,11 @@ const nextStartupOpener = cycler([
   "Here we go, Weather In Real Time. Pulling in the newest alerts.",
   "Weather In Real Time is waking up. Scanning the whole country for alerts.",
   "Booting up Weather In Real Time. Time to see what the sky's doing.",
+  "Weather In Real Time, rolling in. Let's check the skies together.",
+  "Weather In Real Time is live. Radar's hot, let's see what we've got.",
+  "Weather In Real Time, back on the beat. What's the sky up to today?",
+  "Rise and shine — Weather In Real Time is on the air.",
+  "Weather In Real Time, locking onto the radar. Here we go.",
   "Weather In Real Time, coming online. Fetching the latest alerts now.",
 ]);
 const nextStartupClear = cycler([
@@ -1880,14 +1887,34 @@ const nextStartupAlerts = cycler([
   (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", with " + r + (r === 1 ? " storm report" : " storm reports") + " in" : "") + ".",
   (n, r) => "Weather In Real Time. Counting " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " as we speak.",
 ]);
-function announceStartup() {
+function startupSummaryText() {
   const n = currentFeatures.length;
   const r = currentLsrs.length;
-  if (!n && !r) {
-    queueSpeech(nextStartupClear(), 999);
-  } else {
-    queueSpeech(nextStartupAlerts()(n, r), 999);
+  if (!n && !r) return nextStartupClear();
+  return nextStartupAlerts()(n, r);
+}
+/* Welcome-screen buttons still announce the summary right away. */
+function announceStartup() {
+  queueSpeech(startupSummaryText(), 999);
+}
+
+/* Radar sweep lines — one of the rotating opening segments. */
+const nextSweep = cycler([
+  "Let's take a spin around the national radar and see what's cooking out there.",
+  "Spinning up the radar for a full coast-to-coast look.",
+  "Here's the big picture on live radar right now.",
+  "Time for a lap around the country's radar — let's see what the sky's doing.",
+  "Radar's rolling. Taking the grand tour, coast to coast.",
+  "Let's go radar surfing across the whole country and see what's popping.",
+]);
+
+/* Shuffle an array in place. */
+function shuffleArr(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = a[i]; a[i] = a[j]; a[j] = t;
   }
+  return a;
 }
 
 /* Chatter: keep the voice busy with periodic updates. */
@@ -1935,6 +1962,11 @@ const nextAllClear = cycler([
   "All clear. I'll be here staring at the radar so you don't have to.",
   "All clear nationwide. I'm going to try not to trip over anything while we wait.",
   "Zero alerts. Nimbus is disappointed, I'm relieved, everybody wins.",
+  "The radar's so clean you could eat off it. Don't, though.",
+  "Even the clouds are taking a nap.",
+  "It's suspiciously peaceful. I'm watching anyway.",
+  "Nimbus is napping on the warm receiver. All clear.",
+  "Zero alerts, zero drama, one happy weather nerd.",
   "Nothing happening anywhere. I double-checked so you don't have to trust my coordination.",
 ]);
 const nextCheckin = cycler([
@@ -1950,6 +1982,11 @@ const nextCheckin = cycler([
   "Circling back to this one.",
   "Still here, still clumsy, still watching.",
   "Quick check-in — I didn't break anything this time.",
+  "Still babysitting this storm.",
+  "This one's still on my screen.",
+  "Haven't taken my eyes off it.",
+  "Still in the crosshairs.",
+  "Keeping it on the front burner.",
   "Back on this one. Nimbus sends his regards.",
 ]);
 function chatterMode() { return store.get("chatter", "chatty"); }
@@ -2005,6 +2042,24 @@ async function pollStormReports() {
    written in speakable language. */
 let lastSpcDay1 = "";
 let lastSpcDay2 = "";
+/* Persisted across launches: the outlook only speaks when SPC actually
+   changes it — never again just because the app was reopened. */
+try {
+  if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
+    const s1 = LynxosStore.getItem("spc_day1_key");
+    const s2 = LynxosStore.getItem("spc_day2_key");
+    if (s1) lastSpcDay1 = s1;
+    if (s2) lastSpcDay2 = s2;
+  }
+} catch (e) {}
+function saveSpcKeys() {
+  try {
+    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) {
+      LynxosStore.setItem("spc_day1_key", lastSpcDay1);
+      LynxosStore.setItem("spc_day2_key", lastSpcDay2);
+    }
+  } catch (e) {}
+}
 
 function parseSpcHeadline(text) {
   // Headline looks like: ...THERE IS A SLIGHT RISK OF SEVERE THUNDERSTORMS
@@ -2032,7 +2087,9 @@ const SPC_LEVEL_WORDS = {
   "high": "a high",
 };
 
-async function pollSpcOutlook() {
+/* Returns the outlook speech, or null when SPC hasn't changed it. */
+async function spcOutlookText() {
+  const out = [];
   for (const day of [1, 2]) {
     try {
       const r = await fetch("https://www.spc.noaa.gov/products/outlook/day" + day + "otlk.txt");
@@ -2045,6 +2102,7 @@ async function pollSpcOutlook() {
       const lastKey = day === 1 ? lastSpcDay1 : lastSpcDay2;
       if (key === lastKey) continue;
       if (day === 1) lastSpcDay1 = key; else lastSpcDay2 = key;
+      saveSpcKeys();
       const levelWord = SPC_LEVEL_WORDS[headline.level] || ("a " + headline.level);
       const dayWord = day === 1 ? "today" : "tomorrow";
       let speech = nextOpener() + " the Storm Prediction Center just updated the outlook for " + dayWord + ". " +
@@ -2055,13 +2113,20 @@ async function pollSpcOutlook() {
         speech += s + " ";
       }
       speech += nextAside();
-      queueSpeech(speech, 65);
+      out.push(speech);
     } catch (e) {}
   }
+  return out.length ? out.join(" ") : null;
 }
 
 /* ============ National Weather Intensity Score (WIS-style, 0-500+) ============ */
 let lastWis = -1;
+try {
+  if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
+    const w = LynxosStore.getItem("wis_last");
+    if (w !== null && w !== undefined && w !== "") lastWis = parseInt(w, 10) || 0;
+  }
+} catch (e) {}
 function computeWIS() {
   let s = 0;
   for (const f of currentFeatures) s += scoreAlert(f.properties || {});
@@ -2076,21 +2141,29 @@ const _wisQuiet = cycler([
   "Pretty quiet across the country right now.",
   "Calm nationwide. Nimbus approves.",
   "Barely a blip on the national radar.",
+  "So quiet you could hear a raindrop.",
+  "The whole country's on its best behavior.",
 ]);
 const _wisActive = cycler([
   "Things are active out there.",
   "There's some weather making noise around the country.",
   "A few things popping on the national map.",
+  "A little rumble here and there.",
+  "The map's got some color on it.",
 ]);
 const _wisHeating = cycler([
   "It's heating up nationwide.",
   "The country's getting rowdy, weather-wise.",
   "Plenty of action on the national map right now.",
+  "Strap in, it's a busy one.",
+  "The radar's earning its keep today.",
 ]);
 const _wisPopping = cycler([
   "It's popping off out there, stay weather-aware.",
   "The whole country's lit up. Keep your eyes open.",
   "Serious weather day nationwide. Stay sharp, y'all.",
+  "All hands on deck, weather-wise.",
+  "This is a popcorn-and-radar kind of day.",
 ]);
 function wisFlavor(score) {
   if (score < 50) return _wisQuiet();
@@ -2099,14 +2172,16 @@ function wisFlavor(score) {
   return _wisPopping();
 }
 
-function wisUpdate() {
+/* Returns the intensity speech, or null when the score hasn't really moved.
+   Only speaks on genuine change — never just because the app opened. */
+function wisText() {
   const score = computeWIS();
-  // Only announce on big swings, or every few hours.
-  const now = Date.now();
-  if (lastWis >= 0 && Math.abs(score - lastWis) < 75 && now - (wisUpdate._t || 0) < 4 * 3600000) return;
-  wisUpdate._t = now;
+  if (lastWis >= 0 && Math.abs(score - lastWis) < 75) return null;
   lastWis = score;
-  queueSpeech(nextOpener() + " national weather intensity score is " + score + ". " + wisFlavor(score), 55);
+  try {
+    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) LynxosStore.setItem("wis_last", String(score));
+  } catch (e) {}
+  return nextOpener() + " national weather intensity score is " + score + ". " + wisFlavor(score);
 }
 
 /* Storm reports with personality — like a friend telling you what just came in,
@@ -2123,6 +2198,12 @@ const nextVibe = cycler([
   "This just came across the wire.",
   "Eyes on the ground are reporting.",
   "Oh, this is interesting.",
+  "The wire's buzzing again.",
+  "Somebody saw some stuff.",
+  "Hot mic, hot report.",
+  "The weather radio's earning its keep today.",
+  "Dispatch just lit up.",
+  "Another one for the logbook.",
   "We've got boots-on-the-ground intel.",
 ]);
 
@@ -2466,28 +2547,57 @@ if (store.get("welcomed", "") !== "1") {
       const bar = document.getElementById("announce-bar");
       bar.textContent = "Heads up — " + report;
       bar.style.display = "block";
-      queueSpeech("Quick heads up — " + report + " If it happens again, tell me exactly what you were doing.", 1000);
+      queueSpeech("Quick heads up — " + report + " If it happens again, tell me exactly what you were doing.", 800);
     }
   } catch (e) {}
   // Speak right away on first open — the alert counts follow when the feed lands.
   // The opener rotates through different phrasings so it never sounds identical.
-  queueSpeech(nextStartupOpener(), 999);
-  pollAlerts().then(() => {
-    announceStartup();
-    // One-time voice status: if the new offline voice is still setting up,
-    // say so plainly (low priority so it never wipes the alert summary),
-    // then announce the moment it switches over by itself.
+  queueSpeech(nextStartupOpener(), 800);
+  pollAlerts().then(async () => {
+    // One-time voice status: if Michael is still setting up, show it on
+    // screen. He is the only voice now, so nothing speaks until he's ready —
+    // the moment he is, he announces himself.
     try {
       if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
         kokoroLoadingAnnounced = true;
-        queueSpeech("Heads up — the new Michael voice is still setting up. You'll hear the backup voice until it switches over by itself.", 100);
+        const bar0 = document.getElementById("announce-bar");
+        bar0.textContent = "Setting up Michael's voice — narration starts automatically when he's ready.";
+        bar0.style.display = "block";
       }
     } catch (e) {}
-    pollSpcOutlook(); wisUpdate();
+    // Opening segments in random order — never the same show twice, and the
+    // storm outlook no longer leads by default. Equal scores keep the
+    // shuffled order (the presenter only re-sorts on score).
+    const segments = [startupSummaryText()];
+    const wis = wisText();
+    if (wis) segments.push(wis);
+    segments.push(nextSweep());
+    const spc = await spcOutlookText();
+    if (spc) segments.push(spc);
+    shuffleArr(segments);
+    for (const text of segments) queueSpeech(text, 800);
   });
 }
 /* New-voice status: set true when we tell the user the offline voice is
    still setting up; the watcher below announces the moment it takes over. */
+/* TalkBack-readable voice status in Settings: Ready, Setting up, or the
+   failure reason. Updated every few seconds. */
+function updateVoiceStatus() {
+  const el = document.getElementById("voice-status");
+  if (!el) return;
+  try {
+    if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady) {
+      if (KokoroVoice.isReady()) { el.textContent = "Ready"; el.style.color = "#7fd67f"; return; }
+      const err = KokoroVoice.getLastError ? KokoroVoice.getLastError() : "";
+      if (err) { el.textContent = "Failed: " + err; el.style.color = "#ff7f7f"; return; }
+    }
+  } catch (e) {}
+  el.textContent = "Setting up…";
+  el.style.color = "#ffd97f";
+}
+setInterval(updateVoiceStatus, 5000);
+updateVoiceStatus();
+
 let kokoroLoadingAnnounced = false;
 const kokoroReadyTimer = setInterval(() => {
   try {
@@ -2503,8 +2613,8 @@ setInterval(chatterUpdate, 180000);
 // The presenter drives the tour itself: when it runs dry it pulls the next
 // top warning, so the radar never sits still and voice always matches the map.
 setTimeout(scheduleTourNext, 8000); // first tour stop shortly after launch
-setInterval(pollSpcOutlook, 30 * 60 * 1000); // SPC outlooks update a few times daily
-setInterval(wisUpdate, 30 * 60 * 1000); // national intensity score readout
+setInterval(async () => { const t = await spcOutlookText(); if (t) queueSpeech(t, 65); }, 30 * 60 * 1000); // SPC outlooks update a few times daily
+setInterval(() => { const t = wisText(); if (t) queueSpeech(t, 55); }, 30 * 60 * 1000); // national intensity score readout
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) pollAlerts();
 });
