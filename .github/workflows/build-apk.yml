@@ -138,6 +138,7 @@ jobs:
           import android.content.pm.PackageManager;
           import android.os.Bundle;
           import android.speech.tts.TextToSpeech;
+          import android.speech.tts.UtteranceProgressListener;
           import android.webkit.GeolocationPermissions;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
@@ -152,6 +153,7 @@ jobs:
               private TextToSpeech tts;
               private boolean ttsReady = false;
               private String pendingTts = null;
+              private int ttsUtteranceSeq = 0;
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -191,28 +193,14 @@ jobs:
                           try { getSharedPreferences("weather_realtime", MODE_PRIVATE).edit().remove(key).commit(); } catch (Exception ignored) {}
                       }
                   }, "LynxosStore");
-                  tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
-                      @Override
-                      public void onInit(int status) {
-                          if (status == TextToSpeech.SUCCESS) {
-                              try {
-                                  int result = tts.setLanguage(Locale.US);
-                                  ttsReady = result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED;
-                              } catch (Exception e) { ttsReady = false; }
-                              if (ttsReady && pendingTts != null) {
-                                  String text = pendingTts; pendingTts = null;
-                                  try { tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "wrt-reader"); } catch (Exception ignored) {}
-                              }
-                          }
-                      }
-                  });
+                  initTts();
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
-                      public void speak(String text) {
-                          if (text == null) return;
+                      public String speak(String text) {
+                          if (text == null) return null;
                           if (ttsReady && tts != null) {
-                              try { tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "wrt-reader"); } catch (Exception ignored) {}
-                          } else { pendingTts = text; }
+                              return doTtsSpeak(text);
+                          } else { pendingTts = text; return null; }
                       }
                       @JavascriptInterface
                       public void stop() {
@@ -224,6 +212,59 @@ jobs:
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
                   setContentView(webView);
                   webView.requestFocus();
+              }
+              private void initTts() {
+                  String engine = null;
+                  try {
+                      // Prefer Google's TTS engine — its voices sound far more
+                      // human than the stock Samsung engine on most devices.
+                      getPackageManager().getPackageInfo("com.google.android.tts", 0);
+                      engine = "com.google.android.tts";
+                  } catch (Exception ignored) {}
+                  tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+                      @Override
+                      public void onInit(int status) {
+                          if (status == TextToSpeech.SUCCESS) {
+                              try {
+                                  int result = tts.setLanguage(Locale.US);
+                                  ttsReady = result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED;
+                              } catch (Exception e) { ttsReady = false; }
+                              if (ttsReady) {
+                                  try {
+                                      // Slightly under 1.0: calmer, more natural pacing.
+                                      tts.setSpeechRate(0.95f);
+                                      tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                                          @Override public void onStart(String utteranceId) {}
+                                          @Override public void onDone(String utteranceId) { ttsDoneCallback(utteranceId); }
+                                          @Override public void onError(String utteranceId) { ttsDoneCallback(utteranceId); }
+                                          @Override public void onStop(String utteranceId, boolean interrupted) { ttsDoneCallback(utteranceId); }
+                                          @Override public void onStop(String utteranceId) { ttsDoneCallback(utteranceId); }
+                                      });
+                                  } catch (Exception ignored) {}
+                                  if (pendingTts != null) {
+                                      String text = pendingTts; pendingTts = null;
+                                      try { doTtsSpeak(text); } catch (Exception ignored) {}
+                                  }
+                              }
+                          }
+                      }
+                  }, engine);
+              }
+              private String doTtsSpeak(String text) {
+                  String id = "utt" + (++ttsUtteranceSeq);
+                  try { tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id); } catch (Exception ignored) {}
+                  return id;
+              }
+              private void ttsDoneCallback(final String utteranceId) {
+                  try {
+                      final WebView wv = webView;
+                      if (wv == null) return;
+                      wv.post(new Runnable() {
+                          @Override public void run() {
+                              try { wv.evaluateJavascript("window.__onTtsDone('" + utteranceId + "')", null); } catch (Exception ignored) {}
+                          }
+                      });
+                  } catch (Exception ignored) {}
               }
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
