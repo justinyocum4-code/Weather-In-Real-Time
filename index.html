@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather In Real Time</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --gold: #c9a227; --black: #111; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #fff;
+    font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
+  #weather-realtime-app { position: fixed; inset: 0; }
+  #radar-map { position: absolute; inset: 0; background: #000; z-index: 1; }
+  .leaflet-container { background: #000; font-family: inherit; }
+  /* Top status bar */
+  #top-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 10;
+    background: rgba(0,0,0,.82); border-bottom: 2px solid var(--gold);
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+  #top-bar h1 { margin: 0; font-size: 20px; color: var(--gold); letter-spacing: 1px; flex: 1; }
+  #alert-count { background: var(--gold); color: #111; font-weight: bold; border-radius: 20px;
+    padding: 4px 14px; font-size: 16px; }
+  #clock { color: #ccc; font-size: 14px; }
+  /* Live announcement bar (what the voice is saying) */
+  #announce-bar { position: absolute; top: 58px; left: 12px; right: 12px; z-index: 10;
+    background: rgba(201,162,39,.95); color: #111; border-radius: 10px;
+    padding: 10px 14px; font-weight: bold; font-size: 16px; display: none; }
+  /* Bottom controls */
+  #controls { position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
+    display: flex; gap: 10px; padding: 12px; justify-content: center;
+    background: linear-gradient(transparent, rgba(0,0,0,.9)); flex-wrap: wrap; }
+  #controls button { background: var(--black); color: var(--gold); border: 2px solid var(--gold);
+    border-radius: 12px; padding: 14px 20px; font-size: 17px; font-weight: bold; min-height: 56px; }
+  #controls button:focus, #controls button:hover { background: var(--gold); color: #111; outline: 3px solid #fff; }
+  #controls button[aria-pressed="true"] { background: var(--gold); color: #111; }
+  /* Panels */
+  .panel { position: absolute; z-index: 20; left: 0; right: 0; bottom: 0; max-height: 70%;
+    background: #0a0a0a; border-top: 3px solid var(--gold); overflow-y: auto; padding: 16px; }
+  .panel h2 { color: var(--gold); margin: 0 0 12px 0; }
+  .panel .close-row { text-align: right; margin-bottom: 8px; }
+  .panel button.big { display: block; width: 100%; margin: 8px 0; background: var(--black);
+    color: var(--gold); border: 2px solid var(--gold); border-radius: 10px;
+    padding: 14px; font-size: 17px; font-weight: bold; text-align: left; }
+  .panel button.big:focus { background: var(--gold); color: #111; outline: 3px solid #fff; }
+  .alert-item small { display: block; color: #ccc; font-weight: normal; font-size: 14px; margin-top: 4px; }
+  .sev-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
+  /* Welcome overlay */
+  #welcome { position: absolute; inset: 0; z-index: 50; background: rgba(0,0,0,.94);
+    display: flex; align-items: center; justify-content: center; padding: 24px; }
+  #welcome .card { max-width: 560px; background: #0a0a0a; border: 3px solid var(--gold);
+    border-radius: 16px; padding: 28px; }
+  #welcome h2 { color: var(--gold); margin-top: 0; }
+  #welcome p { line-height: 1.5; }
+  #welcome button { display: block; width: 100%; margin: 10px 0; padding: 16px;
+    font-size: 18px; font-weight: bold; border-radius: 12px; border: 2px solid var(--gold);
+    background: var(--gold); color: #111; }
+  #welcome button.secondary { background: var(--black); color: var(--gold); }
+  #welcome button:focus { outline: 3px solid #fff; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 12px 4px; border-bottom: 1px solid #333; font-size: 17px; }
+  .setting-row button.toggle { min-width: 90px; padding: 10px; border-radius: 10px;
+    border: 2px solid var(--gold); background: var(--black); color: var(--gold);
+    font-size: 16px; font-weight: bold; }
+  .setting-row button.toggle[aria-pressed="true"] { background: var(--gold); color: #111; }
+</style>
+</head>
+<body>
+<div id="weather-realtime-app">
+  <div id="radar-map" aria-hidden="true"></div>
+
+  <div id="top-bar">
+    <h1>WEATHER IN REAL TIME</h1>
+    <span id="clock"></span>
+    <span id="alert-count" role="status">0 alerts</span>
+  </div>
+
+  <div id="announce-bar" role="status" aria-live="polite"></div>
+
+  <div id="controls" role="toolbar" aria-label="Weather controls">
+    <button type="button" id="btn-repeat">Repeat last</button>
+    <button type="button" id="btn-mute" aria-pressed="false">Mute voice</button>
+    <button type="button" id="btn-myarea">My area</button>
+    <button type="button" id="btn-alerts">Alerts</button>
+    <button type="button" id="btn-settings">Settings</button>
+  </div>
+
+  <div id="alerts-panel" class="panel" hidden>
+    <div class="close-row"><button type="button" class="big" id="btn-close-alerts" style="width:auto;display:inline-block;">Close</button></div>
+    <h2>Active weather alerts</h2>
+    <div id="alerts-list"></div>
+  </div>
+
+  <div id="settings-panel" class="panel" hidden>
+    <div class="close-row"><button type="button" class="big" id="btn-close-settings" style="width:auto;display:inline-block;">Close</button></div>
+    <h2>Settings</h2>
+    <div class="setting-row">
+      <span>Voice announcements</span>
+      <button type="button" class="toggle" id="tgl-voice" aria-pressed="true">On</button>
+    </div>
+    <div class="setting-row">
+      <span>Quiet hours (10pm–7am, major warnings only)</span>
+      <button type="button" class="toggle" id="tgl-quiet" aria-pressed="true">On</button>
+    </div>
+    <div class="setting-row">
+      <span>Location</span>
+      <button type="button" class="toggle" id="btn-relocate" style="min-width:140px;">Set location</button>
+    </div>
+    <div class="setting-row">
+      <span id="loc-status">Location not set</span>
+      <button type="button" class="toggle" id="btn-testvoice" style="min-width:140px;">Test voice</button>
+    </div>
+    <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by RainViewer.</p>
+  </div>
+
+  <div id="welcome" hidden>
+    <div class="card">
+      <h2>Weather In Real Time</h2>
+      <p>A full-screen live radar watching the entire United States. When a warning or storm report comes in, the radar moves to it and a voice tells you what is happening and where.</p>
+      <p>To prioritize warnings near you, allow location access.</p>
+      <button type="button" id="btn-enable-loc">Enable location</button>
+      <button type="button" id="btn-skip-loc" class="secondary">Skip for now</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============ Version ============ */
+const WRT_VERSION = "1.0";
+const WRT_VERSION_CODE = 1;
+
+/* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
+const store = {
+  get(k, def) {
+    try {
+      if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
+        const v = LynxosStore.getItem(k);
+        return v == null || v === "" ? def : v;
+      }
+    } catch (e) {}
+    try {
+      const v = localStorage.getItem("wrt_" + k);
+      return v == null ? def : v;
+    } catch (e) { return def; }
+  },
+  set(k, v) {
+    try {
+      if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) {
+        LynxosStore.setItem(k, String(v));
+        return;
+      }
+    } catch (e) {}
+    try { localStorage.setItem("wrt_" + k, String(v)); } catch (e) {}
+  }
+};
+
+/* ============ Voice ============ */
+const voice = {
+  enabled: store.get("voice", "1") === "1",
+  queue: [],
+  timer: null,
+  currentScore: -1,
+  lastSpoken: "",
+  lastSpokenScore: 0
+};
+
+function ttsSpeak(text) {
+  voice.lastSpoken = text;
+  const bar = document.getElementById("announce-bar");
+  bar.textContent = "Now announcing: " + text;
+  bar.style.display = "block";
+  try {
+    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
+      LynxosTts.speak(text);
+      return;
+    }
+  } catch (e) {}
+  try {
+    if ("speechSynthesis" in window) {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0;
+      speechSynthesis.speak(u);
+    }
+  } catch (e) {}
+}
+
+function ttsStop() {
+  try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
+  try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
+}
+
+function speakNext() {
+  if (!voice.queue.length) { voice.timer = null; voice.currentScore = -1; return; }
+  const item = voice.queue.shift();
+  voice.currentScore = item.score;
+  voice.lastSpokenScore = item.score;
+  ttsSpeak(item.text);
+  const dur = Math.max(5000, item.text.length * 90 + 2000);
+  voice.timer = setTimeout(() => { voice.timer = null; speakNext(); }, dur);
+}
+
+/* Queue speech. Higher score = sooner. Interrupts if it far outranks what's playing. */
+function queueSpeech(text, score) {
+  if (!voice.enabled || !text) return;
+  voice.queue.push({ text, score });
+  voice.queue.sort((a, b) => b.score - a.score);
+  if (!voice.timer) {
+    speakNext();
+  } else if (voice.queue[0].score > voice.currentScore + 40) {
+    if (voice.timer) clearTimeout(voice.timer);
+    ttsStop();
+    voice.timer = null;
+    speakNext();
+  }
+}
+
+function repeatLast() {
+  if (voice.lastSpoken) {
+    if (voice.timer) clearTimeout(voice.timer);
+    ttsStop();
+    voice.timer = null;
+    voice.queue.unshift({ text: voice.lastSpoken, score: 999 });
+    speakNext();
+  } else {
+    queueSpeech("Nothing has been announced yet.", 999);
+  }
+}
+
+/* ============ Location ============ */
+let userLoc = null;
+let userState = null;
+(function loadLoc() {
+  const lat = parseFloat(store.get("lat", ""));
+  const lon = parseFloat(store.get("lon", ""));
+  if (isFinite(lat) && isFinite(lon)) {
+    userLoc = { lat, lon };
+    userState = store.get("state", null);
+    updateLocStatus();
+  }
+})();
+
+function updateLocStatus() {
+  const el = document.getElementById("loc-status");
+  el.textContent = userLoc
+    ? "Set: " + userLoc.lat.toFixed(2) + ", " + userLoc.lon.toFixed(2) + (userState ? " (" + userState + ")" : "")
+    : "Location not set";
+}
+
+function requestLocation(done) {
+  if (!navigator.geolocation) { if (done) done(false); return; }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      userLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      store.set("lat", userLoc.lat);
+      store.set("lon", userLoc.lon);
+      updateLocStatus();
+      // Get state abbreviation for the home-state priority boost.
+      fetch("https://api.weather.gov/points/" + userLoc.lat.toFixed(4) + "," + userLoc.lon.toFixed(4))
+        .then((r) => r.json())
+        .then((d) => {
+          try {
+            const st = d.properties.relativeLocation.properties.state;
+            if (st) { userState = st; store.set("state", st); updateLocStatus(); }
+          } catch (e) {}
+        })
+        .catch(() => {});
+      document.getElementById("welcome").hidden = true;
+      store.set("welcomed", "1");
+      if (done) done(true);
+    },
+    () => { if (done) done(false); },
+    { timeout: 12000, maximumAge: 600000 }
+  );
+}
+
+/* ============ Map / radar ============ */
+let map = null;
+let radarLayer = null;
+
+function initMap() {
+  if (typeof L === "undefined") {
+    document.getElementById("announce-bar").textContent = "Map library failed to load. Alerts will still be voiced.";
+    document.getElementById("announce-bar").style.display = "block";
+    return;
+  }
+  map = L.map("radar-map", { keyboard: false, zoomControl: false, attributionControl: false });
+  if (userLoc) map.setView([userLoc.lat, userLoc.lon], 7);
+  else map.setView([39.8, -98.5], 4);
+  document.getElementById("radar-map").setAttribute("tabindex", "-1");
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 12 }).addTo(map);
+  loadRadar();
+  setInterval(loadRadar, 5 * 60 * 1000);
+}
+
+async function loadRadar() {
+  if (!map) return;
+  try {
+    const r = await fetch("https://api.rainviewer.com/public/weather-maps.json");
+    const data = await r.json();
+    const past = data.radar && data.radar.past;
+    if (!past || !past.length) return;
+    const latest = past[past.length - 1];
+    const url = "https://tilecache.rainviewer.com" + latest.path + "/256/{z}/{x}/{y}/2/1_1.png";
+    if (radarLayer) map.removeLayer(radarLayer);
+    radarLayer = L.tileLayer(url, { opacity: 0.65, zIndex: 10 }).addTo(map);
+  } catch (e) {}
+}
+
+let lastPan = 0;
+function panToAlert(p) {
+  if (!map) return;
+  const c = alertCentroid(p);
+  if (!c) return;
+  const now = Date.now();
+  if (now - lastPan < 20000) return; // don't yank the map constantly
+  lastPan = now;
+  map.flyTo([c.lat, c.lon], 8, { duration: 2.5 });
+}
+
+/* ============ Alert geometry ============ */
+const STATE_CENTERS = { AL:[32.7,-86.9], AK:[61.4,-152.3], AZ:[33.7,-111.5], AR:[34.9,-92.3], CA:[36.1,-119.7], CO:[39,-105.5], CT:[41.6,-72.7], DE:[39.3,-75.5], FL:[27.8,-81.7], GA:[32.9,-83.4], HI:[21.1,-157.5], ID:[44.2,-114.5], IL:[40,-89.2], IN:[39.8,-86.1], IA:[42,-93.5], KS:[38.5,-98.4], KY:[37.5,-85.3], LA:[31,-92], ME:[45.3,-69.4], MD:[39.1,-76.6], MA:[42.2,-71.5], MI:[43.9,-84.9], MN:[46.3,-94.2], MS:[32.7,-89.6], MO:[38.4,-92.5], MT:[46.9,-110], NE:[41.1,-99.9], NV:[38.3,-116.4], NH:[43.4,-71.5], NJ:[40.3,-74.5], NM:[34.8,-106.2], NY:[42.1,-74.9], NC:[35.6,-79], ND:[47.4,-100.5], OH:[40.4,-82.9], OK:[35.5,-97.5], OR:[44,-120.5], PA:[41,-77.5], RI:[41.7,-71.5], SC:[33.8,-80.9], SD:[44.2,-99.4], TN:[35.7,-86.7], TX:[31,-100], UT:[39.5,-111.4], VT:[44.0,-72.7], VA:[37.9,-78.1], WA:[47.4,-120.5], WV:[38.6,-80.6], WI:[44.3,-89.5], WY:[42.8,-107.6], DC:[38.9,-77] };
+
+function stateCentroidFromArea(areaDesc) {
+  if (!areaDesc) return null;
+  const m = areaDesc.match(/\b([A-Z]{2})\b/);
+  if (m && STATE_CENTERS[m[1]]) {
+    const [lat, lon] = STATE_CENTERS[m[1]];
+    return { lat, lon };
+  }
+  return null;
+}
+
+function alertCentroid(feature) {
+  const p = feature.properties || {};
+  let geom = feature.geometry || p.geometry;
+  if (geom) {
+    let coords = null;
+    if (geom.type === "Polygon") coords = geom.coordinates[0];
+    else if (geom.type === "MultiPolygon") coords = geom.coordinates[0][0];
+    if (coords && coords.length) {
+      let lat = 0, lon = 0;
+      for (const [x, y] of coords) { lon += x; lat += y; }
+      return { lat: lat / coords.length, lon: lon / coords.length };
+    }
+  }
+  return stateCentroidFromArea(p.areaDesc);
+}
+
+function distanceMiles(lat1, lon1, lat2, lon2) {
+  const R = 3959;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/* ============ Priority scoring: severity x proximity ============ */
+function scoreAlert(p) {
+  let s = 0;
+  const sev = (p.severity || "").toLowerCase();
+  if (sev === "extreme") s += 100;
+  else if (sev === "severe") s += 80;
+  else if (sev === "moderate") s += 50;
+  else if (sev === "minor") s += 30;
+  else s += 40;
+  const ev = (p.event || "").toLowerCase();
+  if (ev.includes("tornado emergency")) s += 40;
+  else if (ev.includes("tornado")) s += 15;
+  if (ev.includes("flash flood")) s += 10;
+  if (ev.includes("hurricane") || ev.includes("tropical storm")) s += 10;
+  const c = alertCentroid({ properties: p, geometry: p.geometry });
+  if (c && userLoc) {
+    const d = distanceMiles(userLoc.lat, userLoc.lon, c.lat, c.lon);
+    if (d < 50) s += 40;
+    else if (d < 150) s += 25;
+    else if (d < 400) s += 10;
+    if (userState && (p.areaDesc || "").includes(userState)) s += 15;
+  }
+  return s;
+}
+
+function isQuietHours() {
+  if (store.get("quiet", "1") !== "1") return false;
+  const h = new Date().getHours();
+  return h >= 22 || h < 7;
+}
+
+function severityColor(p) {
+  const sev = (p.severity || "").toLowerCase();
+  const ev = (p.event || "").toLowerCase();
+  if (ev.includes("tornado")) return "#ff2222";
+  if (sev === "extreme") return "#ff2222";
+  if (sev === "severe") return "#ff8800";
+  if (sev === "moderate") return "#ffdd00";
+  return "#888888";
+}
+
+function buildAnnouncement(p) {
+  const event = p.event || "Weather alert";
+  const area = p.areaDesc || "";
+  const headline = p.headline || "";
+  let text = event + ". " + area + ". " + headline;
+  // Mention law-enforcement / spotter reports — they're often the key detail.
+  const desc = p.description || "";
+  const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
+  if (m) text += " Report: " + m[1];
+  if (text.length > 600) text = text.slice(0, 600) + ".";
+  return text;
+}
+
+/* ============ Alerts polling ============ */
+const seenAlertIds = new Set();
+const alertMarkers = {};
+let currentFeatures = [];
+
+async function pollAlerts() {
+  try {
+    const r = await fetch("https://api.weather.gov/alerts/active?status=actual&limit=500");
+    if (!r.ok) throw new Error("bad status");
+    const data = await r.json();
+    const features = data.features || [];
+    currentFeatures = features;
+    processAlerts(features);
+    document.getElementById("alert-count").textContent = features.length + (features.length === 1 ? " alert" : " alerts");
+  } catch (e) {
+    document.getElementById("alert-count").textContent = "feed offline";
+  }
+}
+
+function processAlerts(features) {
+  const liveIds = new Set();
+  for (const f of features) {
+    liveIds.add(f.id);
+    if (!seenAlertIds.has(f.id)) {
+      seenAlertIds.add(f.id);
+      onNewAlert(f);
+    }
+  }
+  // Forget expired alerts so a re-issued alert counts as new.
+  for (const id of [...seenAlertIds]) {
+    if (!liveIds.has(id)) seenAlertIds.delete(id);
+  }
+  renderAlertsList();
+  renderMarkers();
+}
+
+function onNewAlert(f) {
+  const p = f.properties || {};
+  const score = scoreAlert(p);
+  if (isQuietHours() && score < 70) return; // logged in the list, not spoken
+  queueSpeech("New alert. " + buildAnnouncement(p), score);
+  if (score >= 55) panToAlert(p);
+}
+
+function renderMarkers() {
+  if (!map) return;
+  for (const id of Object.keys(alertMarkers)) {
+    map.removeLayer(alertMarkers[id]);
+    delete alertMarkers[id];
+  }
+  for (const f of currentFeatures.slice(0, 120)) {
+    const p = f.properties || {};
+    const c = alertCentroid(f);
+    if (!c) continue;
+    const color = severityColor(p);
+    const m = L.circleMarker([c.lat, c.lon], {
+      radius: 9, color, fillColor: color, fillOpacity: 0.65, weight: 2
+    }).addTo(map);
+    m.bindTooltip(p.event || "Alert", { permanent: false });
+    m.on("click", () => {
+      map.flyTo([c.lat, c.lon], 8, { duration: 1.5 });
+      queueSpeech(buildAnnouncement(p), 999);
+    });
+    alertMarkers[f.id] = m;
+  }
+}
+
+function renderAlertsList() {
+  const list = document.getElementById("alerts-list");
+  list.innerHTML = "";
+  if (!currentFeatures.length) {
+    list.innerHTML = "<p style='color:#999'>No active alerts in the United States right now.</p>";
+    return;
+  }
+  const sorted = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+  for (const f of sorted.slice(0, 60)) {
+    const p = f.properties || {};
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "big alert-item";
+    const color = severityColor(p);
+    b.innerHTML = '<span class="sev-dot" style="background:' + color + '"></span>' +
+      escapeHtml(p.event || "Alert") +
+      "<small>" + escapeHtml(p.areaDesc || "") + "</small>" +
+      "<small>" + escapeHtml(p.headline || "") + "</small>";
+    b.addEventListener("click", () => {
+      const c = alertCentroid(f);
+      if (c && map) map.flyTo([c.lat, c.lon], 8, { duration: 1.5 });
+      queueSpeech(buildAnnouncement(p), 999);
+      const desc = p.description || "";
+      const instr = p.instruction || "";
+      if (desc || instr) queueSpeech("Details. " + (desc + " " + instr).slice(0, 900), 998);
+      document.getElementById("alerts-panel").hidden = true;
+    });
+    list.appendChild(b);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ============ UI wiring ============ */
+function showPanel(id) {
+  document.getElementById("alerts-panel").hidden = id !== "alerts-panel";
+  document.getElementById("settings-panel").hidden = id !== "settings-panel";
+}
+
+document.getElementById("btn-repeat").addEventListener("click", repeatLast);
+
+document.getElementById("btn-mute").addEventListener("click", function () {
+  voice.enabled = !voice.enabled;
+  store.set("voice", voice.enabled ? "1" : "0");
+  this.setAttribute("aria-pressed", String(!voice.enabled));
+  this.textContent = voice.enabled ? "Mute voice" : "Unmute voice";
+  syncVoiceToggle();
+  if (!voice.enabled) {
+    if (voice.timer) clearTimeout(voice.timer);
+    voice.timer = null;
+    voice.queue.length = 0;
+    ttsStop();
+  } else {
+    queueSpeech("Voice on.", 999);
+  }
+});
+
+document.getElementById("btn-myarea").addEventListener("click", () => {
+  if (userLoc && map) {
+    map.flyTo([userLoc.lat, userLoc.lon], 8, { duration: 1.5 });
+    queueSpeech("Showing your area.", 999);
+  } else {
+    queueSpeech("Your location is not set. Open Settings to set it.", 999);
+    showPanel("settings-panel");
+  }
+});
+
+document.getElementById("btn-alerts").addEventListener("click", () => {
+  renderAlertsList();
+  showPanel("alerts-panel");
+  document.getElementById("btn-close-alerts").focus();
+});
+document.getElementById("btn-close-alerts").addEventListener("click", () => {
+  document.getElementById("alerts-panel").hidden = true;
+});
+
+document.getElementById("btn-settings").addEventListener("click", () => {
+  showPanel("settings-panel");
+  document.getElementById("btn-close-settings").focus();
+});
+document.getElementById("btn-close-settings").addEventListener("click", () => {
+  document.getElementById("settings-panel").hidden = true;
+});
+
+function syncVoiceToggle() {
+  const t = document.getElementById("tgl-voice");
+  t.setAttribute("aria-pressed", String(voice.enabled));
+  t.textContent = voice.enabled ? "On" : "Off";
+  const m = document.getElementById("btn-mute");
+  m.setAttribute("aria-pressed", String(!voice.enabled));
+  m.textContent = voice.enabled ? "Mute voice" : "Unmute voice";
+}
+document.getElementById("tgl-voice").addEventListener("click", () => {
+  document.getElementById("btn-mute").click();
+});
+
+function syncQuietToggle() {
+  const on = store.get("quiet", "1") === "1";
+  const t = document.getElementById("tgl-quiet");
+  t.setAttribute("aria-pressed", String(on));
+  t.textContent = on ? "On" : "Off";
+}
+document.getElementById("tgl-quiet").addEventListener("click", () => {
+  const on = store.get("quiet", "1") === "1";
+  store.set("quiet", on ? "0" : "1");
+  syncQuietToggle();
+});
+
+document.getElementById("btn-relocate").addEventListener("click", () => {
+  queueSpeech("Getting your location.", 999);
+  requestLocation((ok) => {
+    queueSpeech(ok ? "Location set." : "Could not get your location.", 999);
+  });
+});
+
+document.getElementById("btn-testvoice").addEventListener("click", () => {
+  queueSpeech("This is Weather In Real Time. The voice is working.", 999);
+});
+
+document.getElementById("btn-enable-loc").addEventListener("click", () => {
+  requestLocation((ok) => {
+    queueSpeech(ok
+      ? "Location set. Monitoring the entire United States."
+      : "Location unavailable. Monitoring the entire United States.", 999);
+    pollAlerts();
+  });
+});
+document.getElementById("btn-skip-loc").addEventListener("click", () => {
+  document.getElementById("welcome").hidden = true;
+  store.set("welcomed", "1");
+  queueSpeech("Monitoring the entire United States.", 999);
+  pollAlerts();
+});
+
+/* Clock */
+function tickClock() {
+  const d = new Date();
+  let h = d.getHours(), m = d.getMinutes();
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  document.getElementById("clock").textContent = h + ":" + String(m).padStart(2, "0") + " " + ap;
+}
+
+/* ============ Boot ============ */
+document.getElementById("app-version").textContent = WRT_VERSION;
+syncVoiceToggle();
+syncQuietToggle();
+updateLocStatus();
+tickClock();
+setInterval(tickClock, 30000);
+initMap();
+if (store.get("welcomed", "") !== "1") {
+  document.getElementById("welcome").hidden = false;
+  setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
+} else {
+  pollAlerts();
+}
+setInterval(pollAlerts, 60000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollAlerts();
+});
+</script>
+</body>
+</html>
