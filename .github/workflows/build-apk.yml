@@ -290,6 +290,28 @@ jobs:
                           kokoroGen++;
                           try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
                       }
+                      // True once the offline AI voice is warmed up and speaking.
+                      // The page uses this to tell the user whether the new
+                      // voice is ready or still setting up.
+                      @JavascriptInterface
+                      public boolean isReady() { return kokoroReady && kokoroTts != null; }
+                      // If the last init attempt failed, the reason (saved to
+                      // a file so it survives to the next launch, when the app
+                      // reads it aloud as a startup heads-up). Empty when the
+                      // voice is ready or no failure was recorded.
+                      @JavascriptInterface
+                      public String getLastError() {
+                          try {
+                              if (kokoroReady) return "";
+                              java.io.File f = new java.io.File(getFilesDir(), "kokoro-voice/.last-error");
+                              if (!f.exists()) return "";
+                              java.io.FileInputStream in = new java.io.FileInputStream(f);
+                              byte[] b = new byte[(int) Math.min(f.length(), 512)];
+                              int n = in.read(b); in.close();
+                              if (n <= 0) return "";
+                              return new String(b, 0, n, "UTF-8");
+                          } catch (Throwable th) { return ""; }
+                      }
                   }, "KokoroVoice");
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
@@ -298,7 +320,10 @@ jobs:
               }
               /* Copy the bundled Kokoro voice out of the APK into private
                  storage (native code needs real file paths), then build
-                 the sherpa-onnx TTS engine on a worker thread. */
+                 the sherpa-onnx TTS engine on a worker thread. The copy is
+                 resumable: files already synced are skipped and each file is
+                 written atomically, so killing the app mid-copy just resumes
+                 next launch instead of starting over. */
               private void kokoroEnsureInit() {
                   if (kokoroReady || kokoroStarting) return;
                   kokoroStarting = true;
@@ -306,9 +331,9 @@ jobs:
                       try {
                           java.io.File dest = new java.io.File(getFilesDir(), "kokoro-voice");
                           java.io.File marker = new java.io.File(dest, ".ready");
+                          java.io.File errFile = new java.io.File(dest, ".last-error");
                           if (!marker.exists()) {
-                              deleteRecursive(dest);
-                              copyAssetDir("kokoro-voice", dest);
+                              syncAssetDir("kokoro-voice", dest);
                               marker.createNewFile();
                           }
                           java.io.File modelFile = findFirstEndingWith(dest, ".onnx", ".onnx.json");
@@ -341,7 +366,19 @@ jobs:
                           kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(getAssets(), config);
                           try { kokoroTts.generate("Voice ready.", 16, 1.0f); } catch (Throwable ignored) {} // warm-up
                           kokoroReady = true;
+                          try { errFile.delete(); } catch (Throwable ignored) {}
                       } catch (Throwable t) {
+                          // Persist the reason so the next launch can report it
+                          // aloud instead of failing silently forever.
+                          try {
+                              java.io.File dest = new java.io.File(getFilesDir(), "kokoro-voice");
+                              dest.mkdirs();
+                              String msg = String.valueOf(t);
+                              if (msg.length() > 300) msg = msg.substring(0, 300);
+                              java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dest, ".last-error"));
+                              out.write(msg.getBytes("UTF-8"));
+                              out.close();
+                          } catch (Throwable ignored) {}
                           kokoroStarting = false; // let a later speak() retry
                       }
                   } }).start();
@@ -396,26 +433,28 @@ jobs:
                       try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
                   }
               }
-              private void copyAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
+              /* Copy one asset tree into private storage, skipping files that
+                 are already there. Each file is written to a .part file and
+                 renamed, so a kill mid-copy can never leave a half file:
+                 anything present is complete, and the next launch resumes
+                 where the last one stopped. */
+              private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
                   String[] list = getAssets().list(assetPath);
                   if (list == null || list.length == 0) {
+                      if (dest.exists()) return; // already synced
                       java.io.InputStream in = getAssets().open(assetPath);
                       dest.getParentFile().mkdirs();
-                      java.io.OutputStream out = new java.io.FileOutputStream(dest);
-                      byte[] buf = new byte[65536];
+                      java.io.File tmp = new java.io.File(dest.getParentFile(), dest.getName() + ".part");
+                      java.io.OutputStream out = new java.io.FileOutputStream(tmp);
+                      byte[] buf = new byte[131072];
                       int n;
                       while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
                       in.close(); out.close();
+                      if (!tmp.renameTo(dest)) { dest.delete(); tmp.renameTo(dest); }
                       return;
                   }
                   dest.mkdirs();
-                  for (String name : list) copyAssetDir(assetPath + "/" + name, new java.io.File(dest, name));
-              }
-              private void deleteRecursive(java.io.File f) {
-                  try {
-                      if (f.isDirectory()) { java.io.File[] kids = f.listFiles(); if (kids != null) for (java.io.File k : kids) deleteRecursive(k); }
-                      f.delete();
-                  } catch (Throwable ignored) {}
+                  for (String name : list) syncAssetDir(assetPath + "/" + name, new java.io.File(dest, name));
               }
               private java.io.File findFirstEndingWith(java.io.File dir, String ext, String skipExt) {
                   try {
