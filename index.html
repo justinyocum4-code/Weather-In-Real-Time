@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.3.0";
-const WRT_VERSION_CODE = 7;
+const WRT_VERSION = "1.4.0";
+const WRT_VERSION_CODE = 8;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -485,10 +485,14 @@ function recapAlerts() {
    speak as they happen; the chatter recaps ongoing ones. */
 function announceStartup() {
   const n = currentFeatures.length;
-  if (!n) {
+  const r = currentLsrs.length;
+  if (!n && !r) {
     queueSpeech("Weather In Real Time. All clear. No active weather alerts.", 999);
   } else {
-    queueSpeech("Weather In Real Time. " + n + (n === 1 ? " active alert right now." : " active alerts right now."), 999);
+    let text = "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts");
+    if (r) text += " and " + r + (r === 1 ? " storm report" : " storm reports");
+    text += " right now.";
+    queueSpeech(text, 999);
   }
 }
 
@@ -533,6 +537,52 @@ async function pollAlerts() {
   } catch (e) {
     document.getElementById("alert-count").textContent = "feed offline";
   }
+  // Storm reports (spotters, law enforcement, emergency management) — separate feed.
+  pollStormReports();
+}
+
+/* Local Storm Reports: real reports from trained spotters, law enforcement,
+   emergency management, and the public. Updated as they're filed. */
+const seenLsrIds = new Set();
+let currentLsrs = [];
+
+async function pollStormReports() {
+  try {
+    const r = await fetch("https://mesonet.agron.iastate.edu/geojson/lsr.py");
+    if (!r.ok) return;
+    const data = await r.json();
+    const feats = data.features || [];
+    currentLsrs = feats;
+    for (const f of feats) {
+      const p = f.properties || {};
+      const id = (p.valid || "") + "|" + (p.type || "") + "|" + (p.city || "") + "|" + (p.magnitude || "");
+      if (!seenLsrIds.has(id)) {
+        seenLsrIds.add(id);
+        onNewStormReport(f);
+      }
+    }
+  } catch (e) {}
+}
+
+function onNewStormReport(f) {
+  const p = f.properties || {};
+  const type = p.type || "weather";
+  const city = p.city || "";
+  const state = p.state || "";
+  const source = p.source || "a spotter";
+  const mag = p.magnitude ? ", " + p.magnitude : "";
+  const remark = p.remark ? " " + p.remark : "";
+  let text = "Storm report. " + type + mag + (city ? " in " + city : "") + (state ? ", " + state : "") +
+    ". Reported by " + source + "." + remark;
+  if (text.length > 300) text = text.slice(0, 300) + ".";
+  queueSpeech(text, 75);
+  // Move the map to the report location.
+  try {
+    const coords = f.geometry && f.geometry.coordinates;
+    if (coords && coords.length >= 2 && map) {
+      map.flyTo([coords[1], coords[0]], 8, { duration: 2.5 });
+    }
+  } catch (e) {}
 }
 
 function processAlerts(features) {
