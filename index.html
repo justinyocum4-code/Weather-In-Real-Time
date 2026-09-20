@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.7.1";
-const WRT_VERSION_CODE = 12;
+const WRT_VERSION = "1.8.0";
+const WRT_VERSION_CODE = 13;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -238,7 +238,7 @@ function ttsSpeak(text) {
     if ("speechSynthesis" in window) {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 0.75;
+      u.rate = 0.7;
       if (bestVoice) u.voice = bestVoice;
       speechSynthesis.speak(u);
     }
@@ -435,14 +435,16 @@ async function loadRadar() {
 }
 
 let lastPan = 0;
-function panToAlert(p) {
+function panToAlert(p, immediate) {
   if (!map) return;
   const c = alertCentroid(p);
   if (!c) return;
   const now = Date.now();
-  if (now - lastPan < 20000) return; // don't yank the map constantly
+  // New alerts and reports pan right away. Chatter rotation waits 8 seconds
+  // between moves so it doesn't yank the map constantly.
+  if (!immediate && now - lastPan < 8000) return;
   lastPan = now;
-  map.flyTo([c.lat, c.lon], 8, { duration: 2.5 });
+  map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
 }
 
 /* ============ Alert geometry ============ */
@@ -463,6 +465,9 @@ function alertCentroid(feature) {
   const p = (feature && feature.properties) || feature || {};
   let geom = feature && feature.geometry ? feature.geometry : p.geometry;
   if (geom) {
+    if (geom.type === "Point" && geom.coordinates && geom.coordinates.length >= 2) {
+      return { lat: geom.coordinates[1], lon: geom.coordinates[0] };
+    }
     let coords = null;
     if (geom.type === "Polygon") coords = geom.coordinates[0];
     else if (geom.type === "MultiPolygon") coords = geom.coordinates[0][0];
@@ -545,32 +550,89 @@ function articleFor(word) {
   return /^[aeiou]/i.test(word) ? "an" : "a";
 }
 
+/* Say the state once, then the counties: "Texas: Dallas, Tarrant, and Collin counties." */
+function formatArea(p) {
+  const areaDesc = p.areaDesc || "";
+  const headline = p.headline || "";
+  // Marine/coastal zones don't follow the county pattern — just expand states.
+  if (/waters|coastal|harbor|bay|sound|strait|ocean|gulf/i.test(areaDesc)) {
+    return expandStates(areaDesc);
+  }
+  const parts = areaDesc.split(";").map(s => s.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  let headlineState = null;
+  const hm = headline.match(/NWS\s+[\w\s\/.\-']+\b([A-Z]{2})\b/);
+  if (hm && STATE_NAMES[hm[1]]) headlineState = hm[1];
+  const byState = {};
+  const noState = [];
+  for (const part of parts) {
+    const m = part.match(/^(.+?),\s*([A-Z]{2})$/);
+    if (m && STATE_NAMES[m[2]]) {
+      if (!byState[m[2]]) byState[m[2]] = [];
+      byState[m[2]].push(m[1].trim());
+    } else {
+      noState.push(part);
+    }
+  }
+  if (noState.length) {
+    const st = headlineState || "";
+    if (!byState[st]) byState[st] = [];
+    byState[st].push(...noState);
+  }
+  const chunks = [];
+  for (const [st, names] of Object.entries(byState)) {
+    const uniq = [...new Set(names)];
+    const countyWord = uniq.length > 1 ? "counties" : "county";
+    const list = uniq.length > 2
+      ? uniq.slice(0, -1).join(", ") + ", and " + uniq[uniq.length - 1]
+      : uniq.join(" and ");
+    chunks.push(st && STATE_NAMES[st] ? (STATE_NAMES[st] + ": " + list + " " + countyWord) : (list + " " + countyWord));
+  }
+  return chunks.join(". ");
+}
+
+/* Story-style transitions to keep it flowing like someone telling you what's happening. */
+const STORY_BITS = [
+  "Here's what's going on.",
+  "Here's the story.",
+  "Let me tell you what's happening.",
+];
+let storyIndex = 0;
+
 function buildAnnouncement(p) {
   const event = (p.event || "Weather alert").toLowerCase();
-  const area = expandStates(p.areaDesc || "");
-  // Talk like a person, not a weather readout.
-  let text = nextOpener() + " we've got " + articleFor(event) + " " + event + (area ? " for " + area : "") + ". ";
-  // Storm motion, conversational: "it's heading northeast at about 40 miles an hour."
+  const area = formatArea(p);
+  // Story opening — varied, personal.
+  const openers = [
+    nextOpener() + " we've got " + articleFor(event) + " " + event,
+    nextOpener() + " there's " + articleFor(event) + " " + event + " out there",
+    nextOpener() + " " + STORY_BITS[storyIndex % STORY_BITS.length] + " We've got " + articleFor(event) + " " + event,
+  ];
+  storyIndex++;
+  let text = openers[Math.floor(Math.random() * openers.length)];
+  if (area) text += ", covering " + area;
+  text += ". ";
+  // Development: storm motion, like describing what's unfolding.
   const motion = extractMotion(p.description || "");
-  if (motion) text += "It's " + motion + ". ";
-  // Road impacts, conversational: "they're saying roads are closed and trees are down."
+  if (motion) text += "It's " + motion + ", and ";
+  // Road impacts, conversational.
   const impacts = extractRoadImpacts(p.description || "");
-  if (impacts) text += "They're saying " + impacts + " ";
-  // Spotter / law-enforcement reports, conversational.
+  if (impacts) text += "they're saying " + impacts + " ";
+  // Spotter / law-enforcement reports — the human detail.
   const desc = p.description || "";
   const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
   if (m) {
     let report = m[1].trim();
     if (report.length > 150) report = report.slice(0, 150) + ".";
-    text += "And " + report.charAt(0).toLowerCase() + report.slice(1) + " ";
+    text += "Now, " + report.charAt(0).toLowerCase() + report.slice(1) + " ";
   }
-  // Safety tip, conversational — only for the dangerous ones.
+  // Stakes: what to do, like a friend would say it.
   if (/tornado/i.test(event)) {
-    text += "If you're in the area, get to the lowest floor and away from windows. ";
+    text += "If you're anywhere near there, get to the lowest floor and away from windows. ";
   } else if (/flash flood/i.test(event)) {
-    text += "Remember, turn around don't drown — never drive through flooded roads. ";
+    text += "And remember, turn around don't drown, never try driving through flooded roads. ";
   }
-  if (text.length > 400) text = text.slice(0, 400) + ".";
+  if (text.length > 450) text = text.slice(0, 450) + ".";
   return text;
 }
 
@@ -706,13 +768,8 @@ function onNewStormReport(f) {
     ". This one's from " + source + "." + remark;
   if (text.length > 350) text = text.slice(0, 350) + ".";
   queueSpeech(text, 75);
-  // Move the map to the report location.
-  try {
-    const coords = f.geometry && f.geometry.coordinates;
-    if (coords && coords.length >= 2 && map) {
-      map.flyTo([coords[1], coords[0]], 8, { duration: 2.5 });
-    }
-  } catch (e) {}
+  // Move the map to the report location right away.
+  panToAlert(f, true);
 }
 
 function processAlerts(features) {
@@ -737,7 +794,7 @@ function onNewAlert(f) {
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
   queueSpeech(buildAnnouncement(p), score);
-  if (score >= 55) panToAlert(f);
+  if (score >= 55) panToAlert(f, true);
 }
 
 function renderMarkers() {
