@@ -694,13 +694,15 @@ jobs:
           set -e
           mkdir -p app/src/main/assets/piper-voice
           cd app/src/main/assets/piper-voice
-          # Piper VITS voice bundle, hosted by the sherpa-onnx project itself.
-          curl -fSL -o piper-voice.tar.bz2 "https://huggingface.co/csukuangfj/tts-models/resolve/main/vits-piper-en_US-ryan-medium.tar.bz2"
-          # espeak-ng phonemizer data (needed by Piper voices).
-          curl -fSL -o espeak-ng-data.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2"
+          # Official sherpa-onnx TTS release (per the sherpa-onnx docs):
+          # vits-piper-en_US-lessac-medium, a male US-English voice. The
+          # tarball already contains espeak-ng-data/, so one download is
+          # all the app needs. Extracted into the APK assets, copied to
+          # private storage on first launch, and spoken through the
+          # PiperVoice native bridge whenever the cloud voice is down.
+          curl -fSL --retry 3 -o piper-voice.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2"
           tar -xjf piper-voice.tar.bz2
-          tar -xjf espeak-ng-data.tar.bz2
-          rm piper-voice.tar.bz2 espeak-ng-data.tar.bz2
+          rm piper-voice.tar.bz2
           echo "Piper voice assets:"
           find . -type f | head -20
           du -sh .
