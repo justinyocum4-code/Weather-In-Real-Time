@@ -233,6 +233,11 @@ jobs:
                                   try {
                                       // Slightly under 1.0: calmer, more natural pacing.
                                       tts.setSpeechRate(0.95f);
+                                      // A touch lower than default pitch reads warmer, less robotic.
+                                      tts.setPitch(0.93f);
+                                      pickBestTtsVoice();
+                                      // The voice list can load late — re-pick once it arrives.
+                                      try { new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { pickBestTtsVoice(); } }, 3000); } catch (Exception ignored2) {}
                                       tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                                           @Override public void onStart(String utteranceId) {}
                                           @Override public void onDone(String utteranceId) { ttsDoneCallback(utteranceId); }
@@ -248,6 +253,38 @@ jobs:
                           }
                       }
                   }, engine);
+              }
+              /* Pick the highest-quality English voice the engine offers.
+                 Neural / natural / premium voices sound far more human than
+                 the default compact voice, so prefer them by name and quality. */
+              private void pickBestTtsVoice() {
+                  try {
+                      if (tts == null) return;
+                      java.util.Set<android.speech.tts.Voice> voices = tts.getVoices();
+                      if (voices == null || voices.isEmpty()) return;
+                      android.speech.tts.Voice best = null;
+                      int bestScore = -1000000;
+                      for (android.speech.tts.Voice v : voices) {
+                          java.util.Locale loc = v.getLocale();
+                          if (loc == null || !"en".equalsIgnoreCase(loc.getLanguage())) continue;
+                          String n = v.getName() == null ? "" : v.getName().toLowerCase(java.util.Locale.US);
+                          int s = 0;
+                          if (n.contains("wavenet")) s += 60;
+                          if (n.contains("neural")) s += 50;
+                          if (n.contains("natural")) s += 40;
+                          if (n.contains("premium") || n.contains("enhanced")) s += 30;
+                          if (n.contains("google")) s += 20;
+                          if (n.contains("compact") || n.contains("robot")) s -= 60;
+                          try {
+                              int q = v.getQuality();
+                              if (q >= 400) s += 25;
+                              else if (q >= 300) s += 10;
+                          } catch (Exception ignored) {}
+                          if (v.isNetworkConnectionRequired()) s -= 5;
+                          if (s > bestScore) { bestScore = s; best = v; }
+                      }
+                      if (best != null) { try { tts.setVoice(best); } catch (Exception ignored) {} }
+                  } catch (Exception ignored) {}
               }
               private String doTtsSpeak(String text) {
                   String id = "utt" + (++ttsUtteranceSeq);
