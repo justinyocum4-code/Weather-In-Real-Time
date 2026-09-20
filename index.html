@@ -836,8 +836,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.6";
-const WRT_VERSION_CODE = 37;
+const WRT_VERSION = "2.5.7";
+const WRT_VERSION_CODE = 38;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -896,7 +896,7 @@ function expandStates(text) {
 /* The voice, forever: Kokoro (Michael), the on-device AI voice. Unlimited,
    offline, no key, no quota — it simply speaks. It reports completion
    with the id its native speak() returned. There is no backup voice:
-   until Michael is ready, utterances are skipped silently and the
+   until Michael is ready, utterances wait in the presenter queue and the
    announce bar carries the text instead. */
 let utteranceSeq = 0;
 const pvIdMap = {}; // native utterance id -> our speaker id
@@ -965,11 +965,30 @@ const presenter = {
 
   pump() {
     if (this.busy || !this.queue.length || !voice.enabled) return;
+    // Michael is the only voice: never drop narration while he is warming
+    // up. Wait and retry so startup weather still speaks once he's ready.
+    try {
+      if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
+        setTimeout(() => this.pump(), 2000);
+        return;
+      }
+    } catch (e) {}
     this.busy = true;
     const item = this.queue.shift();
     const doSpeak = () => {
       const id = ttsSpeak(item.text);
-      if (!id) { this.next(); return; } // voice not ready: skip, no stray timer
+      if (!id) {
+        // If Michael still isn't ready, put it back and wait — don't skip.
+        try {
+          if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
+            this.queue.unshift(item);
+            this.busy = false;
+            setTimeout(() => this.pump(), 2000);
+            return;
+          }
+        } catch (e) {}
+        this.next(); return;
+      }
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
       // finished-callback never arrives. Covers on-device synthesis time
