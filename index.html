@@ -823,8 +823,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.7.0";
-const WRT_VERSION_CODE = 42;
+const WRT_VERSION = "2.8.0";
+const WRT_VERSION_CODE = 43;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1331,8 +1331,7 @@ function scheduleTourNext() {
         banner.style.display = "block";
       }
     } catch (e) {}
-    const why = whyThisAirs(tp);
-    presenter.add((why ? why + " " : "") + buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
+    presenter.add(buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
   } catch (e) {}
 }
 
@@ -1434,28 +1433,30 @@ const nextNickname = cycler([
 ]);
 
 /* "Why you're hearing this" — YallBot's WHY THIS IS AIRING lower third,
-   spoken out loud. One short line BEFORE the alert, never inside the
-   warning facts. Returns "" when there's nothing special to say. */
+   spoken out loud. RARE by design: only for genuine emergencies, at most
+   once every few minutes, with varied wording, and never twice the same way.
+   The tour and recaps never use it — it only fires on new emergency alerts. */
+let lastWhySpokenAt = 0;
+const nextWhyTornado = cycler([
+  "jumping the queue for this one,",
+  "breaking in for this one,",
+  "cutting straight to this one,",
+]);
 function whyThisAirs(p) {
   try {
+    const now = Date.now();
+    if (now - lastWhySpokenAt < 4 * 60 * 1000) return ""; // don't be a broken record
     const ev = (p.event || "").toLowerCase();
     const desc = (p.description || "").toLowerCase();
+    let line = "";
     if (/tornado/.test(ev) && typeof tornadoThreat === "function" &&
         tornadoThreat(p) === "a confirmed tornado")
-      return "Why you're hearing this, " + nextNickname() + ": a confirmed tornado jumps every queue I've got.";
-    if (/tornado/.test(ev))
-      return "Why you're hearing this: tornado warnings go straight to the top. No waiting in line.";
-    if (/flash flood emergency/.test(ev) || /particularly dangerous situation/.test(desc))
-      return "Why you're hearing this: the weather service flagged this one as particularly dangerous.";
-    if (userLoc) {
-      const c = alertCentroid({ properties: p, geometry: p.geometry });
-      if (c) {
-        const d = Math.round(distanceMiles(userLoc.lat, userLoc.lon, c.lat, c.lon));
-        if (d < 150) return "Why you're hearing this: this one's about " + d + " miles from you, " + nextNickname() + ".";
-      }
-    }
-    if (/extreme|severe/.test((p.severity || "").toLowerCase()))
-      return "Why you're hearing this: it's the most severe thing on the board right now.";
+      line = nextWhyTornado() + " " + nextNickname() + " — a confirmed tornado jumps every queue I've got.";
+    else if (/tornado/.test(ev))
+      line = nextWhyTornado() + " tornado warnings go straight to the top. No waiting in line.";
+    else if (/flash flood emergency/.test(ev) || /particularly dangerous situation/.test(desc))
+      line = "flagging this one specially — the weather service called it particularly dangerous.";
+    if (line) { lastWhySpokenAt = now; return line; }
   } catch (e) {}
   return "";
 }
