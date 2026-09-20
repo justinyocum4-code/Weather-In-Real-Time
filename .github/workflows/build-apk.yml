@@ -245,6 +245,37 @@ jobs:
                           pendingTts = null;
                           try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
                       }
+                      /* v3.0 voice picker: list English voices as JSON
+                         [{name, locale, quality, network}] so the user can
+                         choose the one they like best. */
+                      @JavascriptInterface
+                      public String getVoices() {
+                          try {
+                              if (tts == null) return "[]";
+                              java.util.Set<android.speech.tts.Voice> voices = tts.getVoices();
+                              org.json.JSONArray arr = new org.json.JSONArray();
+                              if (voices == null) return "[]";
+                              for (android.speech.tts.Voice v : voices) {
+                                  java.util.Locale loc = v.getLocale();
+                                  if (loc == null || !"en".equalsIgnoreCase(loc.getLanguage())) continue;
+                                  org.json.JSONObject o = new org.json.JSONObject();
+                                  o.put("name", v.getName());
+                                  o.put("locale", loc.toString());
+                                  try { o.put("quality", v.getQuality()); } catch (Exception ignored) {}
+                                  try { o.put("network", v.isNetworkConnectionRequired()); } catch (Exception ignored) {}
+                                  arr.put(o);
+                              }
+                              return arr.toString();
+                          } catch (Exception e) { return "[]"; }
+                      }
+                      /* Save the user's voice choice and apply it now. */
+                      @JavascriptInterface
+                      public void setVoiceName(String name) {
+                          try {
+                              getSharedPreferences("weather_realtime", MODE_PRIVATE).edit().putString("tts_voice", name).commit();
+                              applyVoiceName(name);
+                          } catch (Exception ignored) {}
+                      }
                   }, "LynxosTts");
 
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
@@ -274,9 +305,14 @@ jobs:
                                       tts.setSpeechRate(0.85f);
                                       // A touch lower than default pitch reads warmer, less robotic.
                                       tts.setPitch(0.93f);
-                                      pickBestTtsVoice();
-                                      // The voice list can load late — re-pick once it arrives.
-                                      try { new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { pickBestTtsVoice(); } }, 3000); } catch (Exception ignored2) {}
+                                      // v3.0: the user's saved voice choice wins over the auto-pick.
+                                      String savedVoice = null;
+                                      try { savedVoice = getSharedPreferences("weather_realtime", MODE_PRIVATE).getString("tts_voice", null); } catch (Exception ignored3) {}
+                                      final String savedVoiceFinal = savedVoice;
+                                      boolean haveVoice = savedVoice != null && applyVoiceName(savedVoice);
+                                      if (!haveVoice) pickBestTtsVoice();
+                                      // The voice list can load late — re-apply once it arrives.
+                                      try { new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { if (savedVoiceFinal != null) applyVoiceName(savedVoiceFinal); else pickBestTtsVoice(); } }, 3000); } catch (Exception ignored2) {}
                                       tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                                           @Override public void onStart(String utteranceId) {}
                                           @Override public void onDone(String utteranceId) { ttsDoneCallback(utteranceId); }
@@ -292,6 +328,21 @@ jobs:
                           }
                       }
                   }, engine);
+              }
+              /* Apply a saved voice by name. Returns true if it matched. */
+              private boolean applyVoiceName(String name) {
+                  try {
+                      if (tts == null || name == null) return false;
+                      java.util.Set<android.speech.tts.Voice> voices = tts.getVoices();
+                      if (voices == null) return false;
+                      for (android.speech.tts.Voice v : voices) {
+                          if (name.equals(v.getName())) {
+                              tts.setVoice(v);
+                              return true;
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  return false;
               }
               /* Pick the highest-quality English voice the engine offers.
                  Neural / natural / premium voices sound far more human than
