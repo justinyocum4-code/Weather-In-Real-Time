@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.4.0";
-const WRT_VERSION_CODE = 8;
+const WRT_VERSION = "1.5.0";
+const WRT_VERSION_CODE = 9;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -171,6 +171,39 @@ const voice = {
   lastSpokenScore: 0
 };
 
+/* Pick the most natural-sounding English voice on the device. */
+let bestVoice = null;
+function pickBestVoice() {
+  try {
+    if (!("speechSynthesis" in window)) return;
+    const voices = speechSynthesis.getVoices();
+    if (!voices.length) return;
+    const en = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith("en"));
+    const pool = en.length ? en : voices;
+    const score = (v) => {
+      const n = (v.name + " " + (v.voiceURI || "")).toLowerCase();
+      let s = 0;
+      if (n.includes("natural")) s += 50;
+      if (n.includes("neural")) s += 50;
+      if (n.includes("premium")) s += 30;
+      if (n.includes("enhanced")) s += 30;
+      if (n.includes("google")) s += 20;
+      if (n.includes("samantha") || n.includes("alex")) s += 20;
+      if (v.localService === false) s += 10; // network voices are usually better
+      if (n.includes("compact") || n.includes("robot")) s -= 50;
+      return s;
+    };
+    pool.sort((a, b) => score(b) - score(a));
+    bestVoice = pool[0];
+  } catch (e) {}
+}
+try {
+  if ("speechSynthesis" in window) {
+    pickBestVoice();
+    speechSynthesis.onvoiceschanged = pickBestVoice;
+  }
+} catch (e) {}
+
 function ttsSpeak(text) {
   voice.lastSpoken = text;
   const bar = document.getElementById("announce-bar");
@@ -187,6 +220,7 @@ function ttsSpeak(text) {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 0.85;
+      if (bestVoice) u.voice = bestVoice;
       speechSynthesis.speak(u);
     }
   } catch (e) {}
@@ -421,24 +455,46 @@ function severityColor(p) {
   return "#888888";
 }
 
-function buildAnnouncement(p) {
+/* Conversational openers — varied so it doesn't sound like a robot reading a list. */
+const CONVO_OPENERS = [
+  "Heads up,",
+  "Quick update,",
+  "Just in,",
+  "Keeping an eye on this one,",
+  "Wanted you to know,",
+];
+let openerIndex = 0;
+function nextOpener() {
+  const o = CONVO_OPENERS[openerIndex % CONVO_OPENERS.length];
+  openerIndex++;
+  return o;
+}
+
+function buildAnnouncement(p, conversational) {
   const event = p.event || "Weather alert";
   const area = p.areaDesc || "";
   const headline = p.headline || "";
-  let text = event + ". " + area + ". " + headline;
+  let text;
+  if (conversational) {
+    // Sound like a person, not a readout: "Heads up, we've got a tornado warning for Dallas County..."
+    text = nextOpener() + " we've got a " + event.toLowerCase() + (area ? " for " + area : "") + ". ";
+    if (headline) text += headline + " ";
+  } else {
+    text = event + ". " + area + ". " + headline;
+  }
   // Storm motion — "moving northeast at 40 mph" keeps the voice informative.
   const motion = extractMotion(p.description || "");
-  if (motion) text += " Storm motion: " + motion + ".";
+  if (motion) text += conversational ? "It's " + motion + ". " : " Storm motion: " + motion + ".";
   // Road impacts — closures, downed trees, flooded roads. Call them out clearly.
   const impacts = extractRoadImpacts(p.description || "");
-  if (impacts) text += " Road impacts: " + impacts;
+  if (impacts) text += conversational ? "Watch out, " + impacts + " " : " Road impacts: " + impacts;
   // Mention law-enforcement / spotter reports — they're often the key detail.
   const desc = p.description || "";
   const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
   if (m) {
     let report = m[1];
     if (report.length > 150) report = report.slice(0, 150) + ".";
-    text += " Report: " + report;
+    text += conversational ? "And " + report.charAt(0).toLowerCase() + report.slice(1) + " " : " Report: " + report;
   }
   if (text.length > 300) text = text.slice(0, 300) + ".";
   return text;
@@ -506,7 +562,7 @@ function chatterUpdate() {
     const now = Date.now();
     if (now - lastAllClear > 15 * 60000) {
       lastAllClear = now;
-      queueSpeech("All clear. No active weather alerts in the United States. Still monitoring.", 60);
+      queueSpeech("All quiet out there. No active weather alerts in the country right now. I'm still watching, I'll let you know the moment something pops up.", 60);
     }
     return;
   }
@@ -514,7 +570,7 @@ function chatterUpdate() {
     const f = feats[chatterIndex % feats.length];
     chatterIndex++;
     const p = f.properties || {};
-    queueSpeech("Update. " + buildAnnouncement(p), 60);
+    queueSpeech(buildAnnouncement(p, true), 60);
     panToAlert(p);
   }
 }
@@ -572,7 +628,7 @@ function onNewStormReport(f) {
   const source = p.source || "a spotter";
   const mag = p.magnitude ? ", " + p.magnitude : "";
   const remark = p.remark ? " " + p.remark : "";
-  let text = "Storm report. " + type + mag + (city ? " in " + city : "") + (state ? ", " + state : "") +
+  let text = nextOpener() + " storm report coming in. " + type + mag + (city ? " in " + city : "") + (state ? ", " + state : "") +
     ". Reported by " + source + "." + remark;
   if (text.length > 300) text = text.slice(0, 300) + ".";
   queueSpeech(text, 75);
@@ -606,7 +662,7 @@ function onNewAlert(f) {
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
-  queueSpeech("New alert. " + buildAnnouncement(p), score);
+  queueSpeech(buildAnnouncement(p, true), score);
   if (score >= 55) panToAlert(p);
 }
 
