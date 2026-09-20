@@ -152,8 +152,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.2";
-const WRT_VERSION_CODE = 17;
+const WRT_VERSION = "2.0.3";
+const WRT_VERSION_CODE = 19;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -249,8 +249,7 @@ function ttsSpeak(text) {
   bar.style.display = "block";
   try {
     if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
-      LynxosTts.speak(text);
-      return;
+      return LynxosTts.speak(text) || null; // native returns the utterance id
     }
   } catch (e) {}
   try {
@@ -262,6 +261,7 @@ function ttsSpeak(text) {
       speechSynthesis.speak(u);
     }
   } catch (e) {}
+  return null;
 }
 
 function ttsStop() {
@@ -269,38 +269,99 @@ function ttsStop() {
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
 }
 
-function speakNext() {
-  if (!voice.queue.length) { voice.timer = null; voice.currentScore = -1; return; }
-  const item = voice.queue.shift();
-  voice.currentScore = item.score;
-  voice.lastSpokenScore = item.score;
-  ttsSpeak(item.text);
-  const dur = Math.max(6000, item.text.length * 120 + 3000);
-  voice.timer = setTimeout(() => { voice.timer = null; speakNext(); }, dur);
-}
+/* ============ Presenter: ONE queue drives the map AND the voice together.
+   Every item: fly the radar to the item's location, wait until it arrives,
+   then narrate THAT item. The next item starts only after the native TTS
+   reports the utterance finished (or a fallback timeout fires). The voice
+   can never describe a place the radar isn't showing. ============ */
+const presenter = {
+  queue: [],
+  busy: false,
+  currentId: null,
+  fallbackTimer: null,
 
-/* Queue speech. Higher score = sooner. Interrupts if it far outranks what's playing. */
-function queueSpeech(text, score) {
-  if (!voice.enabled || !text) return;
-  voice.queue.push({ text, score });
-  voice.queue.sort((a, b) => b.score - a.score);
-  if (!voice.timer) {
-    speakNext();
-  } else if (voice.queue[0].score > voice.currentScore + 40) {
-    if (voice.timer) clearTimeout(voice.timer);
-    ttsStop();
-    voice.timer = null;
-    speakNext();
+  /* move: {lat, lon, zoom} or null. score >= 900 interrupts everything. */
+  add(text, move, score) {
+    if (!voice.enabled || !text) return;
+    score = score || 50;
+    if (score >= 900) {
+      this.clear();
+      this.queue.unshift({ text, move: move || null, score });
+      this.pump();
+      return;
+    }
+    this.queue.push({ text, move: move || null, score });
+    this.queue.sort((a, b) => b.score - a.score);
+    if (this.queue.length > 8) this.queue.length = 8; // don't go stale
+    this.pump();
+  },
+
+  urgent(text, move) {
+    this.add(text, move, 950);
+  },
+
+  clear() {
+    this.queue.length = 0;
+    this.busy = false;
+    this.currentId = null;
+    if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
+    try { ttsStop(); } catch (e) {}
+  },
+
+  pump() {
+    if (this.busy || !this.queue.length || !voice.enabled) return;
+    this.busy = true;
+    const item = this.queue.shift();
+    const doSpeak = () => {
+      const id = ttsSpeak(item.text);
+      this.currentId = id;
+      // Fallback: advance when the speech should be done, in case the native
+      // finished-callback never arrives (older installs, desktop testing).
+      const ms = Math.min(120000, Math.max(10000, item.text.length * 85));
+      if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = setTimeout(() => this.next(), ms);
+    };
+    if (item.move && map) {
+      let moved = false;
+      const arrived = () => { if (moved) return; moved = true; doSpeak(); };
+      try {
+        map.once("moveend", arrived);
+        map.flyTo([item.move.lat, item.move.lon], item.move.zoom || 7, { duration: 2.2 });
+        setTimeout(arrived, 4500); // fallback if moveend never fires
+      } catch (e) { arrived(); }
+    } else {
+      doSpeak();
+    }
+  },
+
+  /* Called by native code when an utterance finishes (or is stopped). */
+  onUtteranceDone(id) {
+    if (!this.busy) return;
+    if (id && this.currentId && id !== this.currentId) return; // stale callback
+    this.next();
+  },
+
+  next() {
+    if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
+    this.busy = false;
+    this.currentId = null;
+    setTimeout(() => { this.pump(); scheduleTourNext(); }, 700);
   }
+};
+
+/* Native TTS finished-callback target. */
+window.__onTtsDone = function (id) { presenter.onUtteranceDone(id); };
+
+/* Queue speech. Higher score = sooner. 900+ interrupts what's playing.
+   move is optional {lat, lon, zoom} — the radar flies there first. */
+function queueSpeech(text, score, move) {
+  presenter.add(text, move || null, score || 50);
 }
 
 function repeatLast() {
   if (voice.lastSpoken) {
-    if (voice.timer) clearTimeout(voice.timer);
-    ttsStop();
-    voice.timer = null;
-    voice.queue.unshift({ text: voice.lastSpoken, score: 999 });
-    speakNext();
+    presenter.clear();
+    presenter.add(voice.lastSpoken, null, 999);
   } else {
     queueSpeech("Nothing has been announced yet.", 999);
   }
@@ -493,19 +554,14 @@ function panToAlert(p, immediate) {
   }
 }
 
-/* Visual tour: the map continuously cycles through the most important alerts,
-   so the radar never sits in one spot. Syncs with the threat banner. */
-/* Short spoken line for the tour — keeps the voice in sync with the map. */
-function tourLine(p) {
-  const ev = (p.event || "weather alert").toLowerCase();
-  const area = formatArea(p);
-  const art = /^[aeiou]/.test(ev) ? "an" : "a";
-  return "the " + ev + (area ? " in " + area : "");
-}
-
+/* Tour: when the presenter runs dry, feed it the next most important alert.
+   The radar flies there first, then the full warning is narrated — the voice
+   always describes exactly what the radar is showing. */
 let tourIndex = 0;
-function mapTour() {
+function scheduleTourNext() {
+  if (presenter.busy || presenter.queue.length) return;
   if (!map || !currentFeatures.length) return;
+  if (!voice.enabled || chatterMode() === "off") return;
   try {
     const feats = [...currentFeatures]
       .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
@@ -513,10 +569,10 @@ function mapTour() {
     if (!feats.length) return;
     const f = feats[tourIndex % feats.length];
     tourIndex++;
+    const tp = f.properties || {};
     const c = alertCentroid(f);
     // Threat banner follows the tour — like YallBot's stream title.
     try {
-      const tp = f.properties || {};
       const banner = document.getElementById("threat-banner");
       if (banner) {
         const area = formatArea(tp);
@@ -524,16 +580,7 @@ function mapTour() {
         banner.style.display = "block";
       }
     } catch (e) {}
-    if (!c) return;
-    try { map.flyTo([c.lat, c.lon], 7, { duration: 2.5 }); }
-    catch (e) { try { map.setView([c.lat, c.lon], 7); } catch (e2) {} }
-    // Voice follows the map: say what we're looking at as we arrive.
-    try {
-      if (voice.enabled && chatterMode() !== "off") {
-        const tp = f.properties || {};
-        queueSpeech("Now looking at " + tourLine(tp) + ".", 55);
-      }
-    } catch (e) {}
+    presenter.add(buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
   } catch (e) {}
 }
 
@@ -932,8 +979,8 @@ function recapAlerts() {
   let text = "Recap. " + feats.length + " active alerts nationwide. The most severe: ";
   text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {})).join(" ");
   if (feats.length > 5) text += " Plus " + (feats.length - 5) + " more alerts in the list.";
-  queueSpeech(text, 999);
-  panToAlert(feats[0]);
+  const c0 = alertCentroid(feats[0]);
+  queueSpeech(text, 999, c0 ? { lat: c0.lat, lon: c0.lon, zoom: 7 } : null);
 }
 
 /* Startup: brief status only — never read warnings on open. New warnings
@@ -972,12 +1019,13 @@ function chatterUpdate() {
   }
   if (chatterMode() === "chatty") {
     // Warning check-in: refresh the current top threat like YallBot does.
+    // Goes through the presenter so the radar flies there first.
     const f = feats[chatterIndex % Math.min(feats.length, 8)];
     chatterIndex++;
     const p = f.properties || {};
+    const c = alertCentroid(f);
     const checkin = Math.random() < 0.35 ? "Checking back in. " : "";
-    queueSpeech(checkin + buildAnnouncement(p), 60);
-    // Map movement is owned by mapTour now, so the voice and radar stay in sync.
+    queueSpeech(checkin + buildAnnouncement(p), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
   }
 }
 function chatterMode() { return store.get("chatter", "chatty"); }
@@ -995,7 +1043,7 @@ async function pollAlerts() {
     const features = data.features || [];
     currentFeatures = features;
     processAlerts(features);
-    mapTour();
+    scheduleTourNext();
     drawAlertPolygons(features);
     document.getElementById("alert-count").textContent = features.length + (features.length === 1 ? " alert" : " alerts");
   } catch (e) {
@@ -1165,9 +1213,9 @@ function onNewStormReport(f) {
   const reaction = reportReaction(type, p.magnitude || "");
   if (reaction) text += " " + reaction;
   if (text.length > 400) text = text.slice(0, 400) + ".";
-  queueSpeech(text, 75);
-  // Move the map to the report location right away.
-  panToAlert(f, true);
+  // The presenter flies the radar to the report first, then tells the story.
+  const c = alertCentroid(f);
+  queueSpeech(text, 75, c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
 }
 
 /* First poll: learn what's already out there silently (no 400-announcement
@@ -1203,8 +1251,14 @@ function onNewAlert(f) {
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
-  queueSpeech(buildAnnouncement(p), score);
-  if (score >= 55) panToAlert(f, true);
+  const c = alertCentroid(f);
+  const move = c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null;
+  if (/tornado/i.test(p.event || "")) {
+    // Tornado warnings interrupt everything: map moves first, then it speaks.
+    presenter.urgent(buildAnnouncement(p), move);
+  } else {
+    queueSpeech(buildAnnouncement(p), score, move);
+  }
 }
 
 function renderMarkers() {
@@ -1223,8 +1277,7 @@ function renderMarkers() {
     }).addTo(map);
     m.bindTooltip(p.event || "Alert", { permanent: false });
     m.on("click", () => {
-      map.flyTo([c.lat, c.lon], 8, { duration: 1.5 });
-      queueSpeech(buildAnnouncement(p), 999);
+      presenter.urgent(buildAnnouncement(p), { lat: c.lat, lon: c.lon, zoom: 8 });
     });
     alertMarkers[f.id] = m;
   }
@@ -1250,8 +1303,7 @@ function renderAlertsList() {
       "<small>" + escapeHtml(p.headline || "") + "</small>";
     b.addEventListener("click", () => {
       const c = alertCentroid(f);
-      if (c && map) map.flyTo([c.lat, c.lon], 8, { duration: 1.5 });
-      queueSpeech(buildAnnouncement(p), 999);
+      presenter.urgent(buildAnnouncement(p), c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
       const desc = p.description || "";
       const instr = p.instruction || "";
       if (desc || instr) queueSpeech("Details. " + (desc + " " + instr).slice(0, 900), 998);
@@ -1280,10 +1332,7 @@ document.getElementById("btn-mute").addEventListener("click", function () {
   this.textContent = voice.enabled ? "Mute voice" : "Unmute voice";
   syncVoiceToggle();
   if (!voice.enabled) {
-    if (voice.timer) clearTimeout(voice.timer);
-    voice.timer = null;
-    voice.queue.length = 0;
-    ttsStop();
+    presenter.clear();
   } else {
     queueSpeech("Voice on.", 999);
   }
@@ -1406,7 +1455,9 @@ if (store.get("welcomed", "") !== "1") {
 }
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
-setInterval(mapTour, 45000); // keep the radar moving between top threats
+// The presenter drives the tour itself: when it runs dry it pulls the next
+// top warning, so the radar never sits still and voice always matches the map.
+setTimeout(scheduleTourNext, 8000); // first tour stop shortly after launch
 setInterval(pollSpcOutlook, 30 * 60 * 1000); // SPC outlooks update a few times daily
 setInterval(wisUpdate, 30 * 60 * 1000); // national intensity score readout
 document.addEventListener("visibilitychange", () => {
