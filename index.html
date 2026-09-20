@@ -823,7 +823,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.9";
+const WRT_VERSION = "2.6.0";
 const WRT_VERSION_CODE = 40;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
@@ -975,8 +975,8 @@ const presenter = {
       const arrived = () => { if (moved) return; moved = true; doSpeak(); };
       try {
         map.once("moveend", arrived);
-        map.flyTo([item.move.lat, item.move.lon], item.move.zoom || 7, { duration: 2.2 });
-        setTimeout(arrived, 4500); // fallback if moveend never fires
+        smoothPan(item.move.lat, item.move.lon, item.move.zoom || 7);
+        setTimeout(arrived, 6000); // fallback if moveend never fires
       } catch (e) { arrived(); }
     } else {
       doSpeak();
@@ -1157,7 +1157,7 @@ async function loadStormCells() {
         if (!seenTvsIds.has(id)) {
           seenTvsIds.add(id);
           queueSpeech(nextTvsLine(), 90);
-          map.flyTo([lat, lon], 8, { duration: 2.5 });
+          smoothPan(lat, lon, 8);
         }
       } else if (meso) {
         // Rotating storm — orange marker.
@@ -1241,15 +1241,55 @@ async function loadRadar() {
   // Animation toggles opacity instead of adding/removing layers, so frames
   // crossfade smoothly with zero blank flicker.
   for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
-  if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
+  stopRadarAnim();
   radarLayers = newLayers;
   radarFrameIndex = 0;
   radarLayers[0].setOpacity(0.75);
-  radarAnimTimer = setInterval(() => {
-    try { radarLayers[radarFrameIndex].setOpacity(0); } catch (e) {}
-    radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
-    try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
-  }, 900);
+  startRadarAnim();
+}
+
+/* Radar animation helpers. Named functions so camera moves can pause the
+   loop while panning and resume it after. */
+function radarAnimTick() {
+  if (!radarLayers.length) return;
+  try { radarLayers[radarFrameIndex].setOpacity(0); } catch (e) {}
+  radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
+  try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
+}
+function startRadarAnim() {
+  if (radarAnimTimer) clearInterval(radarAnimTimer);
+  radarAnimTimer = setInterval(radarAnimTick, 900);
+}
+function stopRadarAnim() {
+  if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
+}
+
+/* Buttery camera moves: the radar loop is paused and the radar dimmed while
+   the map glides state to state, so the animation stays silky on slower
+   devices. Uses panTo (a smooth slide) instead of flyTo (a zoom-out-zoom-in
+   that forces the phone to reload tiles mid-move). */
+let panResumeTimer = null;
+function smoothPan(lat, lon, zoom) {
+  if (!map) return;
+  try {
+    stopRadarAnim();
+    if (panResumeTimer) { clearTimeout(panResumeTimer); panResumeTimer = null; }
+    for (const l of radarLayers) { try { l.setOpacity(0.18); } catch (e) {} }
+    map.panTo([lat, lon], { animate: true, duration: 2.2, easeLinearity: 0.1 });
+    const needZoom = zoom && map.getZoom() !== zoom;
+    panResumeTimer = setTimeout(() => {
+      try { if (needZoom) map.setZoom(zoom, { animate: true }); } catch (e) {}
+      panResumeTimer = setTimeout(() => {
+        if (radarLayers.length) {
+          try { radarLayers[radarFrameIndex].setOpacity(0.75); } catch (e) {}
+          startRadarAnim();
+        }
+        panResumeTimer = null;
+      }, needZoom ? 900 : 150);
+    }, needZoom ? 2400 : 2350);
+  } catch (e) {
+    try { map.setView([lat, lon], zoom || map.getZoom()); } catch (e2) {}
+  }
 }
 
 let lastPan = 0;
@@ -1262,11 +1302,7 @@ function panToAlert(p, immediate) {
   // between moves so it doesn't yank the map constantly.
   if (!immediate && now - lastPan < 8000) return;
   lastPan = now;
-  try {
-    map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
-  } catch (e) {
-    try { map.setView([c.lat, c.lon], 8); } catch (e2) {}
-  }
+  smoothPan(c.lat, c.lon, 8);
 }
 
 /* Tour: when the presenter runs dry, feed it the next most important alert.
@@ -2061,6 +2097,146 @@ async function pollStormReports() {
   } catch (e) {}
 }
 
+/* ============ USGS earthquakes (no key needed) ============
+   Significant quakes get announced, marked on the map, and the radar swings
+   over to the epicenter. Big ones (M6+) speak even in quiet hours — that's
+   safety, not chatter. */
+let quakeLayer = null;
+let seenQuakeIds = new Set();
+try {
+  if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
+    const raw = LynxosStore.getItem("quake_seen_ids");
+    if (raw) seenQuakeIds = new Set(JSON.parse(raw));
+  }
+} catch (e) {}
+function saveQuakeIds() {
+  try {
+    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) {
+      LynxosStore.setItem("quake_seen_ids", JSON.stringify([...seenQuakeIds].slice(-200)));
+    }
+  } catch (e) {}
+}
+
+function quakeColor(mag) {
+  if (mag >= 6) return "#ff2222";
+  if (mag >= 5) return "#ff8800";
+  return "#ffdd00";
+}
+
+function nextQuakeLine(mag, place) {
+  const m = mag.toFixed(1);
+  if (mag >= 6) {
+    return "Heads up. A magnitude " + m + " earthquake just struck " + place +
+      ". If you're anywhere near there, drop, cover, and hold on until the shaking stops.";
+  }
+  const lines = [
+    "The earth just hiccuped — a magnitude " + m + " earthquake near " + place + ".",
+    "Seismic side quest, folks — magnitude " + m + " earthquake near " + place + ".",
+    "Did the ground just move for you? Magnitude " + m + " earthquake near " + place + ".",
+    "Nimbus felt that one — magnitude " + m + " earthquake near " + place + "."
+  ];
+  return lines[Math.floor(Math.random() * lines.length)];
+}
+
+async function fetchQuakes() {
+  try {
+    const r = await fetch("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson");
+    if (!r.ok) return;
+    const data = await r.json();
+    const feats = data.features || [];
+    if (map) {
+      if (quakeLayer) { try { map.removeLayer(quakeLayer); } catch (e) {} }
+      quakeLayer = L.layerGroup().addTo(map);
+      for (const f of feats) {
+        const p = f.properties || {};
+        const coords = f.geometry && f.geometry.coordinates;
+        if (!coords || coords.length < 2 || p.mag == null) continue;
+        const color = quakeColor(p.mag);
+        const mk = L.circleMarker([coords[1], coords[0]], {
+          radius: Math.min(16, 5 + p.mag), color, weight: 2, fillColor: color, fillOpacity: 0.55
+        }).addTo(quakeLayer);
+        mk.bindTooltip("M" + p.mag.toFixed(1) + " earthquake", { permanent: false });
+      }
+    }
+    for (const f of feats) {
+      const p = f.properties || {};
+      if (p.mag == null) continue;
+      const id = f.id || (p.time + "|" + p.mag);
+      if (seenQuakeIds.has(id)) continue;
+      seenQuakeIds.add(id);
+      saveQuakeIds();
+      const big = p.mag >= 6;
+      if (isQuietHours() && !big) continue; // moderate quakes wait for morning
+      const coords = f.geometry && f.geometry.coordinates;
+      const move = (coords && coords.length >= 2) ? { lat: coords[1], lon: coords[0], zoom: 6 } : null;
+      queueSpeech(nextQuakeLine(p.mag, p.place || "an unknown location"), big ? 96 : 75, move);
+    }
+  } catch (e) {}
+}
+
+/* ============ SPC mesoscale discussions (no key needed) ============
+   The Storm Prediction Center's forecaster write-ups — often issued right
+   before a watch drops. Only brand-new discussions are announced, once each. */
+let seenMdIds = new Set();
+try {
+  if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
+    const raw = LynxosStore.getItem("spc_md_seen");
+    if (raw) seenMdIds = new Set(JSON.parse(raw));
+  }
+} catch (e) {}
+function saveMdIds() {
+  try {
+    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) {
+      LynxosStore.setItem("spc_md_seen", JSON.stringify([...seenMdIds].slice(-60)));
+    }
+  } catch (e) {}
+}
+
+function parseMdText(text) {
+  const flat = text.replace(/\r/g, "");
+  const c = flat.match(/CONCERNING\.\.\.([^\n]+)/i);
+  const concerning = c ? c[1].replace(/\s+/g, " ").replace(/\.\.\./g, ", ").trim().toLowerCase() : "";
+  const s = flat.match(/\.\.\.SUMMARY\.\.\.\s*\n([\s\S]*?)\$\$/i);
+  let summary = s ? s[1].replace(/\n(?!\n)/g, " ").replace(/\s+/g, " ").trim() : "";
+  // Trim to the first two sentences so it doesn't ramble.
+  const sentences = summary.match(/[^.!?]+[.!?]+/g) || [summary];
+  summary = sentences.slice(0, 2).join(" ").trim();
+  if (summary.length > 400) summary = summary.slice(0, 397) + "...";
+  return { concerning, summary };
+}
+
+async function fetchMesoscaleDiscussions() {
+  try {
+    const r = await fetch("https://www.spc.noaa.gov/products/md/");
+    if (!r.ok) return;
+    const html = await r.text();
+    const nums = new Set();
+    const re = /md(\d{4})\.html/gi;
+    let m;
+    while ((m = re.exec(html))) nums.add(m[1]);
+    const latest = [...nums].sort().reverse().slice(0, 3);
+    const year = new Date().getFullYear();
+    for (const num of latest) {
+      const id = year + "-" + num;
+      if (seenMdIds.has(id)) continue;
+      seenMdIds.add(id);
+      saveMdIds();
+      try {
+        const pr = await fetch("https://www.spc.noaa.gov/products/md/md" + num + ".html");
+        if (!pr.ok) continue;
+        const text = (await pr.text()).replace(/<[^>]+>/g, " ");
+        if (!/MESOSCALE DISCUSSION/i.test(text)) continue;
+        const parsed = parseMdText(text);
+        if (!parsed.concerning && !parsed.summary) continue;
+        let line = "The Storm Prediction Center just issued mesoscale discussion " + parseInt(num, 10) + ". ";
+        if (parsed.concerning) line += "Concerning: " + parsed.concerning + ". ";
+        if (parsed.summary) line += parsed.summary;
+        queueSpeech(line.trim(), 70);
+      } catch (e2) {}
+    }
+  } catch (e) {}
+}
+
 /* ============ SPC convective outlooks (YallBot-style daily forecasts) ============
    Parses the plain-text SPC outlook — the headline and summary are already
    written in speakable language. */
@@ -2428,7 +2604,7 @@ document.getElementById("btn-mute").addEventListener("click", function () {
 
 document.getElementById("btn-myarea").addEventListener("click", () => {
   if (userLoc && map) {
-    map.flyTo([userLoc.lat, userLoc.lon], 8, { duration: 1.5 });
+    smoothPan(userLoc.lat, userLoc.lon, 8);
     queueSpeech("Showing your area.", 999);
   } else {
     queueSpeech("Your location is not set. Open Settings to set it.", 999);
@@ -2582,6 +2758,10 @@ if (store.get("welcomed", "") !== "1") {
 }
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
+setInterval(fetchQuakes, 5 * 60 * 1000); // USGS significant earthquakes
+setInterval(fetchMesoscaleDiscussions, 10 * 60 * 1000); // SPC forecaster discussions
+setTimeout(fetchQuakes, 20000); // quake check shortly after launch
+setTimeout(fetchMesoscaleDiscussions, 90000); // MD check after startup settles
 // The presenter drives the tour itself: when it runs dry it pulls the next
 // top warning, so the radar never sits still and voice always matches the map.
 setTimeout(scheduleTourNext, 8000); // first tour stop shortly after launch
