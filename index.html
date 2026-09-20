@@ -834,8 +834,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.1.0";
-const WRT_VERSION_CODE = 26;
+const WRT_VERSION = "2.2.0";
+const WRT_VERSION_CODE = 27;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -931,8 +931,8 @@ function ttsSpeak(text) {
   bar.style.display = "block";
   try {
     if (typeof ElevenLabs !== "undefined" && ElevenLabs.hasCredentials && ElevenLabs.hasCredentials()) {
-      const id = ElevenLabs.speak(text);
-      if (id) return id; // native falls back to the built-in voice on any error
+      const id = ElevenLabs.speak(text); // fetch only; MP3 arrives via __onElMp3
+      if (id) { elPending[id] = text; return id; }
     }
   } catch (e) {}
   try {
@@ -952,7 +952,64 @@ function ttsSpeak(text) {
   return null;
 }
 
+/* Cloud-voice MP3 playback through the WebView's own <audio> element —
+   no native MediaPlayer involved. */
+const elPending = {}; // id -> text, waiting for the MP3 download
+const elAudio = {};   // id -> Audio element currently playing
+function elCleanup(id) {
+  try { const a = elAudio[id]; if (a) { a.pause(); a.src = ""; } } catch (e) {}
+  delete elAudio[id];
+  delete elPending[id];
+}
+/* Built-in voice fallback, keeping the SAME utterance id so the presenter
+   queue advances exactly once. */
+const elIdMap = {}; // native/fallback utterance id -> our ElevenLabs id
+function elFallbackSpeak(text, id) {
+  elCleanup(id);
+  try {
+    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
+      const nid = LynxosTts.speak(text);
+      if (nid) elIdMap[nid] = id; // translate the native done-callback to ours
+      else window.__onTtsDone(id);
+      return;
+    }
+  } catch (e) {}
+  try {
+    if ("speechSynthesis" in window) {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 0.7;
+      if (bestVoice) u.voice = bestVoice;
+      u.onend = () => window.__onTtsDone(id);
+      u.onerror = () => window.__onTtsDone(id);
+      speechSynthesis.speak(u);
+      return;
+    }
+  } catch (e) {}
+  window.__onTtsDone(id);
+}
+window.__onElMp3 = function (id, url) {
+  const text = elPending[id];
+  if (text == null) return;
+  try {
+    elCleanup(id);
+    const a = new Audio(url);
+    elAudio[id] = a;
+    a.onended = () => { elCleanup(id); window.__onTtsDone(id); };
+    a.onerror = () => elFallbackSpeak(text, id);
+    const pr = a.play();
+    if (pr && pr.catch) pr.catch(() => elFallbackSpeak(text, id));
+  } catch (e) { elFallbackSpeak(text, id); }
+};
+window.__onElFail = function (id) {
+  const text = elPending[id];
+  if (text == null) { window.__onTtsDone(id); return; }
+  elFallbackSpeak(text, id);
+};
+
 function ttsStop() {
+  try { for (const id of Object.keys(elAudio)) elCleanup(id); } catch (e) {}
+  try { for (const id of Object.keys(elPending)) delete elPending[id]; } catch (e) {}
   try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
   try { if (typeof ElevenLabs !== "undefined" && ElevenLabs.stop) ElevenLabs.stop(); } catch (e) {}
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
@@ -1039,7 +1096,10 @@ const presenter = {
 };
 
 /* Native TTS finished-callback target. */
-window.__onTtsDone = function (id) { presenter.onUtteranceDone(id); };
+window.__onTtsDone = function (id) {
+  if (id && elIdMap[id]) { id = elIdMap[id]; delete elIdMap[id]; }
+  presenter.onUtteranceDone(id);
+};
 
 /* Queue speech. Higher score = sooner. 900+ interrupts what's playing.
    move is optional {lat, lon, zoom} — the radar flies there first. */
@@ -1651,6 +1711,37 @@ const nextClumsy = cycler([
   "Dropped my pen, chased it under the desk, found three old forecasts down there.",
 ]);
 
+/* Random non-weather chatter — jokes and observations between reports, like
+   YallBot riffing while nothing's happening. Calm weather ONLY. */
+const nextRandom = cycler([
+  "In non-weather news, Nimbus just tried to chase a cloud. He's an optimist.",
+  "Quick break from the weather: I tried to make coffee and the radar judged me.",
+  "Not weather-related, but I just remembered I left my umbrella somewhere. It's fine.",
+  "Studio update: Nimbus is asleep on the national map. The Midwest is now a dog.",
+  "Between storms, a thought: whoever named the sundog really committed to the bit.",
+  "Non-weather bulletin: my chair squeaks in D minor. Anyway.",
+  "I asked Nimbus for his forecast. He barked once. Make of that what you will.",
+  "Random thought: clouds are just sky sheep, and nobody can convince me otherwise.",
+  "In other news, I finally learned how to pronounce Mackinac. You're welcome.",
+  "Studio memo: someone — me — left the radar on spin cycle. It's mesmerizing.",
+  "Not a weather alert, just a feeling: today's a good day to drink water and mind your business.",
+  "I tried to high-five the satellite image. My hand went through the screen. Science is wild.",
+  "Fun question from the studio: if a tree falls in a forest and nobody's there, does it still need a weather alert? Asking for Nimbus.",
+  "Reminder from your clumsy weather friend: stretch, hydrate, and don't lick frozen flagpoles.",
+  "Nimbus rates today's sky four out of five naps. High praise.",
+  "I named one of the clouds Kevin. Kevin's doing great today.",
+]);
+
+/* Presenter hot takes — opinions about the weather, calm moments only. */
+const nextTake = cycler([
+  "Hot take: this ridge of high pressure is just showing off at this point.",
+  "Unpopular opinion: I like a good thunderstorm. Don't tell the roof.",
+  "My take? This calm stretch is the weather apologizing for last week.",
+  "Controversial: I think sunshine is overrated. Give me dramatic clouds.",
+  "Honestly? A quiet radar is the bravest thing on television right now.",
+  "Bold prediction: the weather will continue to be weather. You heard it here first.",
+]);
+
 function buildAnnouncement(p) {
   const event = p.event || "Weather alert";
   const ev = event.toLowerCase();
@@ -1783,10 +1874,15 @@ function chatterUpdate() {
     const now = Date.now();
     if (now - lastAllClear > 15 * 60000) {
       lastAllClear = now;
-      if (Math.random() < 0.45) {
+      const r = Math.random();
+      if (r < 0.3) {
         queueSpeech(calmAside(), 60);
-      } else if (Math.random() < 0.5) {
+      } else if (r < 0.5) {
         queueSpeech(nextClumsy(), 60);
+      } else if (r < 0.7) {
+        queueSpeech(nextRandom(), 60);
+      } else if (r < 0.8) {
+        queueSpeech(nextTake(), 60);
       } else {
         queueSpeech(nextAllClear(), 60);
       }
@@ -2006,21 +2102,54 @@ const nextVibe = cycler([
   "We've got boots-on-the-ground intel.",
 ]);
 
+/* Random pick from a list — for varied reactions. */
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
 /* A human reaction to the report — gives it character. */
 function reportReaction(type, mag) {
   const t = (type || "").toLowerCase();
   const m = (mag || "").toLowerCase();
-  if (/tornado/.test(t)) return "This is the real deal, folks.";
-  if (/funnel/.test(t)) return "That's how tornadoes get started.";
+  if (/tornado/.test(t)) return pick(["This is the real deal, folks.", "Okay, that's the one we never joke about. Take it seriously.", "That's the big one. If you're near there, shelter now."]);
+  if (/funnel/.test(t)) return pick(["That's how tornadoes get started.", "Funnel clouds are nature's way of saying 'pay attention.'"]);
   const inches = parseFloat(m);
-  if (/hail/.test(t) && inches >= 1.75) return "That's gonna do some damage.";
-  if (/hail/.test(t) && inches >= 1) return "That's big enough to dent cars.";
-  if (/hail/.test(t)) return "Even small hail can mess up a garden.";
-  if (/wind|gust/.test(t) && inches >= 70) return "That's hurricane-force, no joke.";
-  if (/wind|gust/.test(t)) return "Strong enough to knock things around.";
-  if (/flood|flash/.test(t)) return "Water is no joke, stay out of it.";
-  if (/snow|ice|blizzard/.test(t)) return "Bundle up out there.";
-  if (/fire|smoke/.test(t)) return "Stay clear of that area.";
+  if (/hail/.test(t) && inches >= 1.75) return pick(["That's gonna do some damage.", "That's windshield-killer hail right there.", "Ouch. That's the kind of hail that totals cars."]);
+  if (/hail/.test(t) && inches >= 1) return pick(["That's big enough to dent cars.", "Quarter-size and up — that's no joke.", "Your car just felt that one."]);
+  if (/hail/.test(t)) return pick(["Even small hail can mess up a garden.", "Small hail, big attitude."]);
+  if (/wind|gust/.test(t) && inches >= 70) return pick(["That's hurricane-force, no joke.", "Seventy-plus mile an hour wind. That's serious.", "That'll rearrange your patio furniture. Permanently."]);
+  if (/wind|gust/.test(t)) return pick(["Strong enough to knock things around.", "Hold onto your hats, literally.", "That's knock-the-trash-cans-over wind."]);
+  if (/flood|flash/.test(t)) return pick(["Water is no joke, stay out of it.", "Six inches of moving water can knock you down. Respect it.", "Turn around, don't drown — ever."]);
+  if (/snow|ice|blizzard/.test(t)) return pick(["Bundle up out there.", "Hot cocoa weather. Stay home if you can.", "Drive like your grandma's in the passenger seat."]);
+  if (/fire|smoke/.test(t)) return pick(["Stay clear of that area.", "If you smell smoke, don't wait around to investigate."]);
+  return pick(["Wild stuff.", "The spotters don't miss much.", "Good eyes on the ground right there."]);
+}
+
+/* Police-scanner framing when the report comes from law enforcement. */
+function reportSourceLine(source) {
+  const s = (source || "").toLowerCase();
+  if (/sheriff|police|highway patrol|trooper|law enforcement/.test(s)) return "Police are reporting";
+  if (/emergency management|emerg/.test(s)) return "Emergency management is reporting";
+  if (/dot|department of transportation/.test(s)) return "The highway department is reporting";
+  if (/trained spotter|skywarn/.test(s)) return "A trained storm spotter is reporting";
+  if (/public/.test(s)) return "Someone on the ground is reporting";
+  return null;
+}
+
+/* Road-safety flavor when the report involves roads. */
+function reportRoadLine(type, remark, city) {
+  const t = ((type || "") + " " + (remark || "")).toLowerCase();
+  if (/road|highway|interstate|street|bridge/.test(t) && /flood|water|closed|impassable/.test(t)) {
+    return pick([
+      "If you're driving near " + (city || "there") + ", be careful — that road's flooding.",
+      "Heads up drivers: that road's under water. Find another way.",
+      "Do not try to drive through it. I know it looks shallow. It's not.",
+    ]);
+  }
+  if (/road|highway|interstate|street/.test(t) && /tree|debris|blocked|closed/.test(t)) {
+    return pick([
+      "Drivers, heads up — that road's blocked. Plan around it.",
+      "If that's your route, pick another one. That road's a mess right now.",
+    ]);
+  }
   return null;
 }
 
@@ -2034,10 +2163,15 @@ function onNewStormReport(f) {
   const remark = p.remark ? " " + p.remark : "";
   let text = nextOpener() + " " + nextVibe() + " " + type + mag +
     (city ? " over in " + city : "") + (state ? ", " + state : "") +
-    ". This one's from " + source + "." + remark;
+    ". ";
+  const srcLine = reportSourceLine(source);
+  text += srcLine ? srcLine + " this one." : "This one's from " + source + ".";
+  if (remark) text += remark;
   const reaction = reportReaction(type, p.magnitude || "");
   if (reaction) text += " " + reaction;
-  if (text.length > 400) text = text.slice(0, 400) + ".";
+  const roadLine = reportRoadLine(type, p.remark || "", city);
+  if (roadLine) text += " " + roadLine;
+  if (text.length > 450) text = text.slice(0, 450) + ".";
   // The presenter flies the radar to the report first, then tells the story.
   const c = alertCentroid(f);
   queueSpeech(text, 75, c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
@@ -2311,6 +2445,19 @@ if (store.get("welcomed", "") !== "1") {
   document.getElementById("welcome").hidden = false;
   setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
 } else {
+  // If the app crashed last run, say so out loud (one short line) before
+  // the normal startup — the native side saved the reason.
+  try {
+    if (typeof LynxosStore !== "undefined" && LynxosStore.getLastCrash) {
+      const crash = LynxosStore.getLastCrash();
+      if (crash) {
+        const bar = document.getElementById("announce-bar");
+        bar.textContent = "Heads up — the app crashed the last time it opened. " + crash;
+        bar.style.display = "block";
+        queueSpeech("Quick heads up — the app crashed the last time it opened. The error was: " + crash + ". If it happens again, tell me exactly what you were doing.", 1000);
+      }
+    }
+  } catch (e) {}
   // Speak right away on first open — the alert counts follow when the feed lands.
   queueSpeech("Weather In Real Time, starting up. Pulling the latest alerts now.", 999);
   pollAlerts().then(() => { announceStartup(); pollSpcOutlook(); wisUpdate(); });
