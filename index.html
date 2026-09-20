@@ -711,10 +711,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
   #alert-count { background: var(--gold); color: #111; font-weight: bold; border-radius: 20px;
     padding: 4px 14px; font-size: 16px; }
   #clock { color: #ccc; font-size: 14px; }
-  /* Live announcement bar (what the voice is saying) */
-  #announce-bar { position: absolute; top: 112px; left: 12px; right: 12px; z-index: 10;
-    background: rgba(201,162,39,.95); color: #111; border-radius: 10px;
-    padding: 10px 14px; font-weight: bold; font-size: 16px; display: none; }
   /* Bottom controls */
   #controls { position: absolute; bottom: 0; left: 0; right: 0; z-index: 10;
     display: flex; gap: 10px; padding: 12px; justify-content: center;
@@ -767,7 +763,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
   </div>
 
   <div id="threat-banner" role="status" aria-live="polite"></div>
-  <div id="announce-bar" role="status" aria-live="polite"></div>
 
   <div id="controls" role="toolbar" aria-label="Weather controls">
     <button type="button" id="btn-repeat">Repeat last</button>
@@ -809,15 +804,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </div>
     <div class="setting-row">
       <span>Voice</span>
-      <span style="font-size:14px;color:#7fd67f;">Built-in AI voice — always on, works offline</span>
-    </div>
-    <div class="setting-row">
-      <span>Michael's voice status</span>
-      <span id="voice-status" style="font-size:14px;color:#ffd97f;">Checking…</span>
-    </div>
-    <div class="setting-row">
-      <span>Voice detail</span>
-      <span id="voice-detail" style="font-size:14px;color:#999;">—</span>
+      <span style="font-size:14px;color:#7fd67f;">Device voice — always on, works offline</span>
     </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
@@ -836,8 +823,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.7";
-const WRT_VERSION_CODE = 38;
+const WRT_VERSION = "2.5.8";
+const WRT_VERSION_CODE = 39;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -893,35 +880,29 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
-/* The voice, forever: Kokoro (Michael), the on-device AI voice. Unlimited,
-   offline, no key, no quota — it simply speaks. It reports completion
-   with the id its native speak() returned. There is no backup voice:
-   until Michael is ready, utterances wait in the presenter queue and the
-   announce bar carries the text instead. */
-let utteranceSeq = 0;
-const pvIdMap = {}; // native utterance id -> our speaker id
+/* The voice: the device's built-in text-to-speech (the original voice).
+   The native side picks the best US English voice available and speaks
+   through it. Returns the native utterance id, which the native side
+   reports back via window.__onTtsDone when it finishes. */
 function ttsSpeak(text) {
   text = expandStates(text);
   voice.lastSpoken = text;
-  const bar = document.getElementById("announce-bar");
-  bar.textContent = "Now announcing: " + text;
-  bar.style.display = "block";
-  const id = "s" + (++utteranceSeq);
   try {
-    if (typeof KokoroVoice !== "undefined" && KokoroVoice.speak) {
-      const pid = KokoroVoice.speak(text);
-      if (pid) { pvIdMap[pid] = id; return id; }
+    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
+      const pid = LynxosTts.speak(text);
+      if (pid) return pid;
     }
   } catch (e) {}
-  // Michael-only: no fallback voices. Return null so the presenter skips
-  // this utterance without arming the fallback timer.
+  // Device TTS still warming up: the native side queued this utterance and
+  // will speak it as soon as init finishes. Null tells the presenter to
+  // treat it as in-flight rather than dropping it.
   return null;
 }
 
 
 
 function ttsStop() {
-  try { if (typeof KokoroVoice !== "undefined" && KokoroVoice.stop) KokoroVoice.stop(); } catch (e) {}
+  try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
 }
 
 /* ============ Presenter: ONE queue drives the map AND the voice together.
@@ -965,29 +946,20 @@ const presenter = {
 
   pump() {
     if (this.busy || !this.queue.length || !voice.enabled) return;
-    // Michael is the only voice: never drop narration while he is warming
-    // up. Wait and retry so startup weather still speaks once he's ready.
-    try {
-      if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
-        setTimeout(() => this.pump(), 2000);
-        return;
-      }
-    } catch (e) {}
     this.busy = true;
     const item = this.queue.shift();
     const doSpeak = () => {
       const id = ttsSpeak(item.text);
       if (!id) {
-        // If Michael still isn't ready, put it back and wait — don't skip.
-        try {
-          if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
-            this.queue.unshift(item);
-            this.busy = false;
-            setTimeout(() => this.pump(), 2000);
-            return;
-          }
-        } catch (e) {}
-        this.next(); return;
+        // Device TTS still warming up: the native side queued this utterance
+        // and will speak it once init finishes. Treat it as in-flight — the
+        // finish callback (or the fallback timer) advances the queue, so the
+        // startup report is never dropped.
+        this.currentId = null;
+        const ms = Math.min(240000, Math.max(20000, item.text.length * 200));
+        if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
+        this.fallbackTimer = setTimeout(() => this.next(), ms);
+        return;
       }
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
@@ -1038,7 +1010,6 @@ window.addEventListener("error", (e) => {
 
 /* Native TTS finished-callback target. */
 window.__onTtsDone = function (id) {
-  if (id && pvIdMap[id]) { id = pvIdMap[id]; delete pvIdMap[id]; }
   presenter.onUtteranceDone(id);
 };
 
@@ -1110,8 +1081,7 @@ let radarLayers = [];
 
 function initMap() {
   if (typeof L === "undefined") {
-    document.getElementById("announce-bar").textContent = "Map library failed to load. Alerts will still be voiced.";
-    document.getElementById("announce-bar").style.display = "block";
+    queueSpeech("Map library failed to load. Alerts will still be voiced.", 800);
     return;
   }
   map = L.map("radar-map", { keyboard: false, zoomControl: false, attributionControl: false });
@@ -2557,19 +2527,8 @@ if (store.get("welcomed", "") !== "1") {
           report = "a script error was logged last time: " + jserr + ".";
         }
       }
-      // If the new offline voice failed to set up last run, say the reason
-      // aloud so it never fails silently. Cleared automatically once ready.
-      if (!report && typeof KokoroVoice !== "undefined" && KokoroVoice.getLastError) {
-        try {
-          const kerr = KokoroVoice.getLastError();
-          if (kerr) report = "the new voice failed to load. The error was: " + kerr + ".";
-        } catch (e3) {}
-      }
     }
     if (report) {
-      const bar = document.getElementById("announce-bar");
-      bar.textContent = "Heads up — " + report;
-      bar.style.display = "block";
       queueSpeech("Quick heads up — " + report + " If it happens again, tell me exactly what you were doing.", 800);
     }
   } catch (e) {}
@@ -2577,17 +2536,6 @@ if (store.get("welcomed", "") !== "1") {
   // The opener rotates through different phrasings so it never sounds identical.
   queueSpeech(nextStartupOpener(), 800);
   pollAlerts().then(async () => {
-    // One-time voice status: if Michael is still setting up, show it on
-    // screen. He is the only voice now, so nothing speaks until he's ready —
-    // the moment he is, he announces himself.
-    try {
-      if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
-        kokoroLoadingAnnounced = true;
-        const bar0 = document.getElementById("announce-bar");
-        bar0.textContent = "Setting up Michael's voice — narration starts automatically when he's ready.";
-        bar0.style.display = "block";
-      }
-    } catch (e) {}
     // Opening segments in random order — never the same show twice, and the
     // storm outlook no longer leads by default. Equal scores keep the
     // shuffled order (the presenter only re-sorts on score).
@@ -2601,44 +2549,6 @@ if (store.get("welcomed", "") !== "1") {
     for (const text of segments) queueSpeech(text, 800);
   });
 }
-/* New-voice status: set true when we tell the user the offline voice is
-   still setting up; the watcher below announces the moment it takes over. */
-/* TalkBack-readable voice status in Settings: Ready, Setting up, or the
-   failure reason. Updated every few seconds. */
-function updateVoiceStatus() {
-  const el = document.getElementById("voice-status");
-  if (!el) return;
-  try {
-    const det = document.getElementById("voice-detail");
-    if (det && typeof KokoroVoice !== "undefined" && KokoroVoice.getLastSpeakInfo) {
-      const info = KokoroVoice.getLastSpeakInfo() || "";
-      det.textContent = info || "—";
-      det.style.color = /FAILED/.test(info) ? "#ff7f7f" : "#999";
-    }
-  } catch (e) {}
-  try {
-    if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady) {
-      if (KokoroVoice.isReady()) { el.textContent = "Ready"; el.style.color = "#7fd67f"; return; }
-      const err = KokoroVoice.getLastError ? KokoroVoice.getLastError() : "";
-      if (err) { el.textContent = "Failed: " + err; el.style.color = "#ff7f7f"; return; }
-    }
-  } catch (e) {}
-  el.textContent = "Setting up…";
-  el.style.color = "#ffd97f";
-}
-setInterval(updateVoiceStatus, 5000);
-updateVoiceStatus();
-
-let kokoroLoadingAnnounced = false;
-const kokoroReadyTimer = setInterval(() => {
-  try {
-    if (kokoroLoadingAnnounced && typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && KokoroVoice.isReady()) {
-      kokoroLoadingAnnounced = false;
-      clearInterval(kokoroReadyTimer);
-      queueSpeech("The new voice is ready.", 60);
-    }
-  } catch (e) {}
-}, 15000);
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
 // The presenter drives the tour itself: when it runs dry it pulls the next
