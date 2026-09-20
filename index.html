@@ -834,8 +834,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.2.1";
-const WRT_VERSION_CODE = 28;
+const WRT_VERSION = "2.3.0";
+const WRT_VERSION_CODE = 29;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -976,6 +976,13 @@ const elIdMap = {}; // native/fallback utterance id -> our ElevenLabs id
 function elFallbackSpeak(text, id) {
   elCleanup(id);
   elSilenceOthers(id);
+  // Piper (on-device AI voice) first — unlimited, offline, human-sounding.
+  try {
+    if (typeof PiperVoice !== "undefined" && PiperVoice.speak) {
+      const pid = PiperVoice.speak(text);
+      if (pid) { elIdMap[pid] = id; return; }
+    }
+  } catch (e) {}
   try {
     if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
       const nid = LynxosTts.speak(text);
@@ -1021,6 +1028,7 @@ window.__onElFail = function (id) {
 function ttsStop() {
   try { for (const id of Object.keys(elAudio)) elCleanup(id); } catch (e) {}
   try { for (const id of Object.keys(elPending)) delete elPending[id]; } catch (e) {}
+  try { if (typeof PiperVoice !== "undefined" && PiperVoice.stop) PiperVoice.stop(); } catch (e) {}
   try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
   try { if (typeof ElevenLabs !== "undefined" && ElevenLabs.stop) ElevenLabs.stop(); } catch (e) {}
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
@@ -1296,7 +1304,7 @@ async function loadRadar() {
     // Build one tile layer per frame (last 8 frames) and cycle them.
     const frames = past.slice(-8);
     for (const f of frames) {
-      const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/2/1_1.png";
+      const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/5/1_1.png"; // 5 = NEXRAD Level III palette (pro look)
       radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10, className: "radar-frame" }));
     }
     if (!radarLayers.length) return;
