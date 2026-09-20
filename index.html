@@ -834,8 +834,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.2.0";
-const WRT_VERSION_CODE = 27;
+const WRT_VERSION = "2.2.1";
+const WRT_VERSION_CODE = 28;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -961,11 +961,21 @@ function elCleanup(id) {
   delete elAudio[id];
   delete elPending[id];
 }
+/* Belt and suspenders: when a new utterance starts sounding, any other
+   cloud audio still playing is stale — silence it so voices can't overlap. */
+function elSilenceOthers(keepId) {
+  try {
+    for (const id of Object.keys(elAudio)) {
+      if (id !== keepId) elCleanup(id);
+    }
+  } catch (e) {}
+}
 /* Built-in voice fallback, keeping the SAME utterance id so the presenter
    queue advances exactly once. */
 const elIdMap = {}; // native/fallback utterance id -> our ElevenLabs id
 function elFallbackSpeak(text, id) {
   elCleanup(id);
+  elSilenceOthers(id);
   try {
     if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
       const nid = LynxosTts.speak(text);
@@ -993,6 +1003,7 @@ window.__onElMp3 = function (id, url) {
   if (text == null) return;
   try {
     elCleanup(id);
+    elSilenceOthers(id);
     const a = new Audio(url);
     elAudio[id] = a;
     a.onended = () => { elCleanup(id); window.__onTtsDone(id); };
@@ -1061,9 +1072,14 @@ const presenter = {
     const doSpeak = () => {
       const id = ttsSpeak(item.text);
       this.currentId = id;
-      // Fallback: advance when the speech should be done, in case the native
-      // finished-callback never arrives (older installs, desktop testing).
-      const ms = Math.min(120000, Math.max(10000, item.text.length * 85));
+      // Fallback: advance when the speech should be done, in case the
+      // finished-callback never arrives. Cloud-voice utterances ("el" ids)
+      // need much more headroom — the MP3 downloads first, THEN plays.
+      // Too-short timers were firing mid-utterance and piling voices up.
+      const cloud = id && id.indexOf("el") === 0;
+      const ms = cloud
+        ? Math.min(180000, 20000 + item.text.length * 150)
+        : Math.min(120000, Math.max(10000, item.text.length * 85));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
     };
@@ -1094,6 +1110,16 @@ const presenter = {
     setTimeout(() => { this.pump(); scheduleTourNext(); }, 700);
   }
 };
+
+/* Catch script errors and stash a one-liner where the next launch can find
+   it — JavaScript mistakes don't force-close the app, but if one happens
+   right before a death, this tells us what the app was doing. */
+window.addEventListener("error", (e) => {
+  try {
+    const msg = "JS: " + String((e && e.message) || "error").slice(0, 200);
+    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) LynxosStore.setItem("last_js_error", msg);
+  } catch (err) {}
+});
 
 /* Native TTS finished-callback target. */
 window.__onTtsDone = function (id) {
@@ -1709,6 +1735,14 @@ const nextClumsy = cycler([
   "If I mispronounce your county, take it up with my mouth, not me.",
   "I waved at the radar and it waved back. I think we're friends now.",
   "Dropped my pen, chased it under the desk, found three old forecasts down there.",
+  "I just said 'back to you' and there's nobody else here. Anyway, back to me.",
+  "Tripped over the radar cable. The whole country's wobbling. Sorry about that.",
+  "My notes say 'be professional.' My brain says 'tell them about the pigeon.' The pigeon won.",
+  "I rehearsed this county name in the mirror. Still botched it. Growth.",
+  "Nimbus just photobombed the satellite loop. He's famous now.",
+  "I spilled water on the forecast. The forecast is now 'damp.'",
+  "Tried to look serious pointing at the map. Pointed at my own face. Nailed it.",
+  "The autocue scrolled too fast and I just went with it. Hope that made sense.",
 ]);
 
 /* Random non-weather chatter — jokes and observations between reports, like
@@ -1730,6 +1764,25 @@ const nextRandom = cycler([
   "Reminder from your clumsy weather friend: stretch, hydrate, and don't lick frozen flagpoles.",
   "Nimbus rates today's sky four out of five naps. High praise.",
   "I named one of the clouds Kevin. Kevin's doing great today.",
+  "Nimbus just barked at thunder three counties away. Early warning system: online.",
+  "I tried to nap during the quiet stretch. The radar tattled on me.",
+  "Somewhere, someone just said 'looks like rain' while staring directly at rain.",
+  "Weather confession: I have a favorite cloud. Don't tell the others.",
+  "The jet stream called. It wants its drama back.",
+  "Nimbus gives this quiet stretch two paws up. He's easy to please.",
+  "If the sky were a group chat, it'd be muted right now. Peaceful.",
+  "I just watched a tumbleweed cross the radar. Not weather. Just vibing.",
+  "Hotdog vendors across America are enjoying this calm. Respect.",
+  "Somewhere a kid is disappointed there's no thunder to be scared of. Lucky kid.",
+  "The radar's so calm I could hear a raindrop. If there were one.",
+  "Nimbus update: he found a sunbeam and filed for permanent residency.",
+  "I asked Nimbus for the forecast. He wagged. Take that as you will.",
+  "If you're grilling right now, the sky approves. Carry on.",
+  "Breaking: absolutely nothing is happening, and honestly? We love that.",
+  "The clouds are doing that thing where they look like stuff. I'm seeing a dragon. Nimbus sees lunch.",
+  "Somewhere out there, somebody's grill cover is about to become a kite. Stay vigilant.",
+  "Pro tip: lick your finger, hold it up, congratulations — you're a weather instrument.",
+  "No storms right now, so I'm just vibing. The radar's vibing. We're all vibing.",
 ]);
 
 /* Presenter hot takes — opinions about the weather, calm moments only. */
@@ -1740,6 +1793,18 @@ const nextTake = cycler([
   "Controversial: I think sunshine is overrated. Give me dramatic clouds.",
   "Honestly? A quiet radar is the bravest thing on television right now.",
   "Bold prediction: the weather will continue to be weather. You heard it here first.",
+  "Hot take: fog is just a cloud that gave up on its dreams.",
+  "Unpopular opinion: wind is the sky's way of fidgeting.",
+  "Bold prediction: someone, somewhere, is complaining about this exact weather right now.",
+  "My take: sleet is nature's participation trophy. Pick rain or snow.",
+  "Controversial: a 20 percent chance of rain means it's definitely raining on somebody.",
+  "Strong opinion: the 'feels like' temperature is the only honest temperature.",
+  "Hot take: dew point is just humidity with a fancier name, and I'm tired of pretending otherwise.",
+  "Unpopular opinion: I respect a storm that commits. Go big or go home.",
+  "My take: whoever named it 'partly cloudy' was an optimist. Or a pessimist. We'll never know.",
+  "Bold prediction: the weekend forecast will change eleven times before the weekend.",
+  "Controversial: drizzle is just rain that couldn't commit.",
+  "Strong opinion: sunshine before 7 AM doesn't count. I said what I said.",
 ]);
 
 function buildAnnouncement(p) {
@@ -1874,17 +1939,14 @@ function chatterUpdate() {
     const now = Date.now();
     if (now - lastAllClear > 15 * 60000) {
       lastAllClear = now;
-      const r = Math.random();
-      if (r < 0.3) {
-        queueSpeech(calmAside(), 60);
-      } else if (r < 0.5) {
-        queueSpeech(nextClumsy(), 60);
-      } else if (r < 0.7) {
-        queueSpeech(nextRandom(), 60);
-      } else if (r < 0.8) {
-        queueSpeech(nextTake(), 60);
-      } else {
-        queueSpeech(nextAllClear(), 60);
+      // Pick two DIFFERENT bits and sometimes riff them back-to-back,
+      // so the quiet stretches feel like a real presenter thinking aloud.
+      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear()];
+      const first = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
+      queueSpeech(first, 60);
+      if (Math.random() < 0.3) {
+        const second = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
+        queueSpeech(second, 59);
       }
     }
     return;
@@ -2445,17 +2507,29 @@ if (store.get("welcomed", "") !== "1") {
   document.getElementById("welcome").hidden = false;
   setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
 } else {
-  // If the app crashed last run, say so out loud (one short line) before
-  // the normal startup — the native side saved the reason.
+  // If anything went wrong last run, say so out loud (one short line) before
+  // the normal startup — native crashes come from getLastCrash(), script
+  // errors from the last_js_error key.
   try {
-    if (typeof LynxosStore !== "undefined" && LynxosStore.getLastCrash) {
-      const crash = LynxosStore.getLastCrash();
-      if (crash) {
-        const bar = document.getElementById("announce-bar");
-        bar.textContent = "Heads up — the app crashed the last time it opened. " + crash;
-        bar.style.display = "block";
-        queueSpeech("Quick heads up — the app crashed the last time it opened. The error was: " + crash + ". If it happens again, tell me exactly what you were doing.", 1000);
+    let report = "";
+    if (typeof LynxosStore !== "undefined") {
+      if (LynxosStore.getLastCrash) {
+        const crash = LynxosStore.getLastCrash();
+        if (crash) report = "the app crashed. The error was: " + crash + ".";
       }
+      if (!report && LynxosStore.getItem) {
+        const jserr = LynxosStore.getItem("last_js_error");
+        if (jserr) {
+          try { LynxosStore.setItem("last_js_error", ""); } catch (e2) {}
+          report = "a script error was logged last time: " + jserr + ".";
+        }
+      }
+    }
+    if (report) {
+      const bar = document.getElementById("announce-bar");
+      bar.textContent = "Heads up — " + report;
+      bar.style.display = "block";
+      queueSpeech("Quick heads up — " + report + " If it happens again, tell me exactly what you were doing.", 1000);
     }
   } catch (e) {}
   // Speak right away on first open — the alert counts follow when the feed lands.
