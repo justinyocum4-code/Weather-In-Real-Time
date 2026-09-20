@@ -828,8 +828,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.5.0";
-const WRT_VERSION_CODE = 31;
+const WRT_VERSION = "2.5.1";
+const WRT_VERSION_CODE = 32;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1853,16 +1853,40 @@ function recapAlerts() {
 
 /* Startup: brief status only — never read warnings on open. New warnings
    speak as they happen; the chatter recaps ongoing ones. */
+/* Startup variety: the opener and the first summary rotate through
+   different phrasings, so opening the app never sounds identical. */
+const nextStartupOpener = cycler([
+  "Weather In Real Time, starting up. Pulling the latest alerts now.",
+  "Weather In Real Time is on. Grabbing the freshest alerts for you.",
+  "Starting up Weather In Real Time. Let's see what's happening out there.",
+  "Weather In Real Time, firing up. Checking the latest alerts now.",
+  "Here we go, Weather In Real Time. Pulling in the newest alerts.",
+  "Weather In Real Time is waking up. Scanning the whole country for alerts.",
+  "Booting up Weather In Real Time. Time to see what the sky's doing.",
+  "Weather In Real Time, coming online. Fetching the latest alerts now.",
+]);
+const nextStartupClear = cycler([
+  "Weather In Real Time. All clear. No active weather alerts.",
+  "Weather In Real Time. Good news — not a single active alert right now.",
+  "Weather In Real Time. The country's quiet. No active alerts to report.",
+  "Weather In Real Time. All quiet nationwide. Nothing to warn about.",
+  "Weather In Real Time. Skies are calm — zero active alerts.",
+  "Weather In Real Time. Clean sweep — no alerts anywhere in the country.",
+]);
+const nextStartupAlerts = cycler([
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now.",
+  (n, r) => "Weather In Real Time. Heads up — " + n + (n === 1 ? " alert" : " alerts") + " on the board" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ".",
+  (n, r) => "Weather In Real Time. We've got " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " to get through.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", with " + r + (r === 1 ? " storm report" : " storm reports") + " in" : "") + ".",
+  (n, r) => "Weather In Real Time. Counting " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " as we speak.",
+]);
 function announceStartup() {
   const n = currentFeatures.length;
   const r = currentLsrs.length;
   if (!n && !r) {
-    queueSpeech("Weather In Real Time. All clear. No active weather alerts.", 999);
+    queueSpeech(nextStartupClear(), 999);
   } else {
-    let text = "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts");
-    if (r) text += " and " + r + (r === 1 ? " storm report" : " storm reports");
-    text += " right now.";
-    queueSpeech(text, 999);
+    queueSpeech(nextStartupAlerts()(n, r), 999);
   }
 }
 
@@ -2429,6 +2453,14 @@ if (store.get("welcomed", "") !== "1") {
           report = "a script error was logged last time: " + jserr + ".";
         }
       }
+      // If the new offline voice failed to set up last run, say the reason
+      // aloud so it never fails silently. Cleared automatically once ready.
+      if (!report && typeof KokoroVoice !== "undefined" && KokoroVoice.getLastError) {
+        try {
+          const kerr = KokoroVoice.getLastError();
+          if (kerr) report = "the new voice failed to load. The error was: " + kerr + ".";
+        } catch (e3) {}
+      }
     }
     if (report) {
       const bar = document.getElementById("announce-bar");
@@ -2438,9 +2470,34 @@ if (store.get("welcomed", "") !== "1") {
     }
   } catch (e) {}
   // Speak right away on first open — the alert counts follow when the feed lands.
-  queueSpeech("Weather In Real Time, starting up. Pulling the latest alerts now.", 999);
-  pollAlerts().then(() => { announceStartup(); pollSpcOutlook(); wisUpdate(); });
+  // The opener rotates through different phrasings so it never sounds identical.
+  queueSpeech(nextStartupOpener(), 999);
+  pollAlerts().then(() => {
+    announceStartup();
+    // One-time voice status: if the new offline voice is still setting up,
+    // say so plainly (low priority so it never wipes the alert summary),
+    // then announce the moment it switches over by itself.
+    try {
+      if (typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && !KokoroVoice.isReady()) {
+        kokoroLoadingAnnounced = true;
+        queueSpeech("Heads up — the new Michael voice is still setting up. You'll hear the backup voice until it switches over by itself.", 100);
+      }
+    } catch (e) {}
+    pollSpcOutlook(); wisUpdate();
+  });
 }
+/* New-voice status: set true when we tell the user the offline voice is
+   still setting up; the watcher below announces the moment it takes over. */
+let kokoroLoadingAnnounced = false;
+const kokoroReadyTimer = setInterval(() => {
+  try {
+    if (kokoroLoadingAnnounced && typeof KokoroVoice !== "undefined" && KokoroVoice.isReady && KokoroVoice.isReady()) {
+      kokoroLoadingAnnounced = false;
+      clearInterval(kokoroReadyTimer);
+      queueSpeech("The new voice is ready.", 60);
+    }
+  } catch (e) {}
+}, 15000);
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
 // The presenter drives the tour itself: when it runs dry it pulls the next
