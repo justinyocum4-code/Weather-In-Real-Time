@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.6.0";
-const WRT_VERSION_CODE = 10;
+const WRT_VERSION = "1.7.0";
+const WRT_VERSION_CODE = 11;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -204,7 +204,26 @@ try {
   }
 } catch (e) {}
 
+/* State abbreviations -> full names, so the voice says "Texas" not "T X". */
+const STATE_NAMES = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+  CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia",
+  FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois",
+  IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana",
+  ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota",
+  MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada",
+  NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York",
+  NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon",
+  PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota",
+  TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia",
+  WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming"
+};
+function expandStates(text) {
+  return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
+}
+
 function ttsSpeak(text) {
+  text = expandStates(text);
   voice.lastSpoken = text;
   const bar = document.getElementById("announce-bar");
   bar.textContent = "Now announcing: " + text;
@@ -219,7 +238,7 @@ function ttsSpeak(text) {
     if ("speechSynthesis" in window) {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 0.85;
+      u.rate = 0.75;
       if (bestVoice) u.voice = bestVoice;
       speechSynthesis.speak(u);
     }
@@ -512,6 +531,7 @@ const CONVO_OPENERS = [
   "Just in,",
   "Keeping an eye on this one,",
   "Wanted you to know,",
+  "Still watching this,",
 ];
 let openerIndex = 0;
 function nextOpener() {
@@ -520,33 +540,36 @@ function nextOpener() {
   return o;
 }
 
-function buildAnnouncement(p, conversational) {
-  const event = p.event || "Weather alert";
-  const area = p.areaDesc || "";
-  const headline = p.headline || "";
-  let text;
-  if (conversational) {
-    // Sound like a person, not a readout: "Heads up, we've got a tornado warning for Dallas County..."
-    text = nextOpener() + " we've got a " + event.toLowerCase() + (area ? " for " + area : "") + ". ";
-    if (headline) text += headline + " ";
-  } else {
-    text = event + ". " + area + ". " + headline;
-  }
-  // Storm motion — "moving northeast at 40 mph" keeps the voice informative.
+function articleFor(word) {
+  return /^[aeiou]/i.test(word) ? "an" : "a";
+}
+
+function buildAnnouncement(p) {
+  const event = (p.event || "Weather alert").toLowerCase();
+  const area = expandStates(p.areaDesc || "");
+  // Talk like a person, not a weather readout.
+  let text = nextOpener() + " we've got " + articleFor(event) + " " + event + (area ? " for " + area : "") + ". ";
+  // Storm motion, conversational: "it's heading northeast at about 40 miles an hour."
   const motion = extractMotion(p.description || "");
-  if (motion) text += conversational ? "It's " + motion + ". " : " Storm motion: " + motion + ".";
-  // Road impacts — closures, downed trees, flooded roads. Call them out clearly.
+  if (motion) text += "It's " + motion + ". ";
+  // Road impacts, conversational: "they're saying roads are closed and trees are down."
   const impacts = extractRoadImpacts(p.description || "");
-  if (impacts) text += conversational ? "Watch out, " + impacts + " " : " Road impacts: " + impacts;
-  // Mention law-enforcement / spotter reports — they're often the key detail.
+  if (impacts) text += "They're saying " + impacts + " ";
+  // Spotter / law-enforcement reports, conversational.
   const desc = p.description || "";
   const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
   if (m) {
-    let report = m[1];
+    let report = m[1].trim();
     if (report.length > 150) report = report.slice(0, 150) + ".";
-    text += conversational ? "And " + report.charAt(0).toLowerCase() + report.slice(1) + " " : " Report: " + report;
+    text += "And " + report.charAt(0).toLowerCase() + report.slice(1) + " ";
   }
-  if (text.length > 300) text = text.slice(0, 300) + ".";
+  // Safety tip, conversational — only for the dangerous ones.
+  if (/tornado/i.test(event)) {
+    text += "If you're in the area, get to the lowest floor and away from windows. ";
+  } else if (/flash flood/i.test(event)) {
+    text += "Remember, turn around don't drown — never drive through flooded roads. ";
+  }
+  if (text.length > 400) text = text.slice(0, 400) + ".";
   return text;
 }
 
@@ -568,7 +591,7 @@ function extractRoadImpacts(desc) {
 
 function extractMotion(desc) {
   const m = desc.match(/moving\s+(north|northeast|east|southeast|south|southwest|west|northwest)(?:\s+at\s+(\d+)\s*mph)?/i);
-  if (m) return m[2] ? ("moving " + m[1] + " at " + m[2] + " miles per hour") : ("moving " + m[1]);
+  if (m) return m[2] ? ("heading " + m[1] + " at about " + m[2] + " miles an hour") : ("heading " + m[1]);
   return null;
 }
 
@@ -620,7 +643,7 @@ function chatterUpdate() {
     const f = feats[chatterIndex % feats.length];
     chatterIndex++;
     const p = f.properties || {};
-    queueSpeech(buildAnnouncement(p, true), 60);
+    queueSpeech(buildAnnouncement(p), 60);
     panToAlert(p);
   }
 }
@@ -674,13 +697,13 @@ function onNewStormReport(f) {
   const p = f.properties || {};
   const type = p.type || "weather";
   const city = p.city || "";
-  const state = p.state || "";
+  const state = expandStates(p.state || "");
   const source = p.source || "a spotter";
   const mag = p.magnitude ? ", " + p.magnitude : "";
   const remark = p.remark ? " " + p.remark : "";
-  let text = nextOpener() + " storm report coming in. " + type + mag + (city ? " in " + city : "") + (state ? ", " + state : "") +
-    ". Reported by " + source + "." + remark;
-  if (text.length > 300) text = text.slice(0, 300) + ".";
+  let text = nextOpener() + " we've got a storm report coming in. " + type + mag + (city ? " over in " + city : "") + (state ? ", " + state : "") +
+    ". This one's from " + source + "." + remark;
+  if (text.length > 350) text = text.slice(0, 350) + ".";
   queueSpeech(text, 75);
   // Move the map to the report location.
   try {
@@ -712,7 +735,7 @@ function onNewAlert(f) {
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
-  queueSpeech(buildAnnouncement(p, true), score);
+  queueSpeech(buildAnnouncement(p), score);
   if (score >= 55) panToAlert(p);
 }
 
