@@ -281,8 +281,9 @@ jobs:
                       @JavascriptInterface
                       public String speak(String text) {
                           try {
-                              if (text == null || text.isEmpty()) return null;
-                              if (!kokoroReady || kokoroTts == null) { kokoroEnsureInit(); return null; }
+                              if (text == null || text.isEmpty()) { kokoroSpeakInfo = "speak skipped: empty text"; return null; }
+                              if (!kokoroReady || kokoroTts == null) { kokoroSpeakInfo = "speak skipped: voice not ready"; kokoroEnsureInit(); return null; }
+                              kokoroSpeakInfo = "speak called: " + text.length() + " chars";
                               kokoroGen++; // silence anything currently playing
                               try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
                               final String id = "kv" + (++ttsUtteranceSeq);
@@ -292,7 +293,12 @@ jobs:
                                   kokoroSpeakWorker(id, t, gen);
                               } }).start();
                               return id;
-                          } catch (Throwable th) { return null; }
+                          } catch (Throwable th) {
+                              String msg = String.valueOf(th);
+                              if (msg.length() > 200) msg = msg.substring(0, 200);
+                              kokoroSpeakInfo = "speak FAILED at entry: " + msg;
+                              return null;
+                          }
                       }
                       @JavascriptInterface
                       public void stop() {
@@ -380,7 +386,7 @@ jobs:
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
                               new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
                           modelConfig.setKokoro(kokoro);
-                          modelConfig.setNumThreads(2);
+                          modelConfig.setNumThreads(4);
                           com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
@@ -425,6 +431,7 @@ jobs:
                  silently because its replacement owns the queue now. */
               private void kokoroSpeakWorker(String id, String text, int gen) {
                   try {
+                      kokoroSpeakInfo = "synthesizing: " + text.length() + " chars";
                       // sid 16 = am_michael, the app's American male voice.
                       com.k2fsa.sherpa.onnx.GeneratedAudio audio = kokoroTts.generate(text, 16, 1.0f);
                       if (gen != kokoroGen) {
