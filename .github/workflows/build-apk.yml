@@ -346,10 +346,16 @@ jobs:
                           java.io.File dataDir = findDirNamed(dest, "espeak-ng-data");
                           if (modelFile == null || voicesFile == null || tokensFile == null)
                               throw new RuntimeException("kokoro model not found");
-                          // sherpa-onnx Java API: no-arg constructors + setters
-                          // (per the official sherpa-onnx TTS docs). The Android
-                          // OfflineTts takes the app AssetManager plus config;
-                          // absolute file paths are resolved as real files.
+                          // sherpa-onnx Android: the OfflineTts constructor takes a
+                          // nullable AssetManager. Passing null selects the
+                          // file-based native path (newFromFile), which reads the
+                          // absolute filesystem paths set above directly.
+                          // Passing getAssets() makes native code treat those
+                          // absolute paths as APK asset names, which fails and
+                          // hard-crashes the whole process at startup (the 2.5.3
+                          // force-close: the native code never ran before
+                          // kotlin-stdlib was bundled in 2.5.3, so 2.5.2 only
+                          // went silent instead of crashing).
                           // Voice: am_michael (sid 16), American male.
                           com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig kokoro =
                               new com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig();
@@ -366,7 +372,7 @@ jobs:
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
-                          kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(getAssets(), config);
+                          kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
                           try { kokoroTts.generate("Voice ready.", 16, 1.0f); } catch (Throwable ignored) {} // warm-up
                           kokoroReady = true;
                           try { errFile.delete(); } catch (Throwable ignored) {}
