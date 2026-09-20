@@ -834,8 +834,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.8";
-const WRT_VERSION_CODE = 24;
+const WRT_VERSION = "2.1.0";
+const WRT_VERSION_CODE = 26;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1467,15 +1467,10 @@ function formatArea(p) {
   for (const [st, names] of Object.entries(byState)) {
     const uniq = [...new Set(names)];
     const countyWord = uniq.length > 1 ? "counties" : "county";
-    // Cap long county lists: name a few, then summarize the rest.
-    let list;
-    if (uniq.length > 6) {
-      list = uniq.slice(0, 4).join(", ") + ", and " + (uniq.length - 4) + " more counties";
-    } else {
-      list = uniq.length > 2
-        ? uniq.slice(0, -1).join(", ") + ", and " + uniq[uniq.length - 1]
-        : uniq.join(" and ");
-    }
+    // Always name EVERY county — no truncation, no "N more counties".
+    const list = uniq.length > 2
+      ? uniq.slice(0, -1).join(", ") + ", and " + uniq[uniq.length - 1]
+      : uniq.join(" and ");
     chunks.push(st && STATE_NAMES[st] ? (STATE_NAMES[st] + ": " + list + " " + countyWord) : (list + " " + countyWord));
   }
   return chunks.join(". ");
@@ -1624,6 +1619,36 @@ const calmAside = cycler([
   "Zero alerts nationwide. I'm as shocked as you are.",
   "Peaceful skies. Don't worry, I'll find something to talk about.",
   "Weather's calm, radar's clean, Nimbus is napping. Living the dream.",
+  "The radar is so calm, Nimbus filed a noise complaint about the silence.",
+  "I asked the clouds for drama and they said, new phone, who dis.",
+  "Weather update: the sky is doing absolutely nothing, and doing it beautifully.",
+  "It's quieter than a library in here. A library full of clouds.",
+  "No storms. I checked twice because I don't trust my own eyes.",
+  "The atmosphere called in calm today. Must be nice.",
+  "Nimbus is snoring so loud the radar picked it up as precipitation.",
+  "Breaking: nothing is happening. More at eleven. Actually, less at eleven.",
+  "I polished the radar dish out of boredom. You're welcome, science.",
+]);
+
+/* Clumsy presenter bits — lovable goof energy. Calm-weather chatter ONLY,
+   never inside a warning. */
+const nextClumsy = cycler([
+  "Okay, I just tripped over the radar cable. We're fine. Everything's fine.",
+  "Nimbus just walked across my keyboard. If the radar spins, that's why.",
+  "I spilled coffee on the weather desk again. The forecast is still dry though.",
+  "Hold on, my chair just tried to escape. Anyway — all quiet out there.",
+  "I read that county name wrong three times in my head before we got here. Moving on.",
+  "Fun fact: I once walked into a doorframe during a tornado warning. True story.",
+  "Nimbus ate my notes, so we're winging this one. Radar's calm, that's the whole report.",
+  "I bumped the microphone. Sorry about that. Professional, I know.",
+  "My teleprompter just gave up on me. We're doing this from memory.",
+  "I tried to point at the radar and pointed at the wrong state. Classic me.",
+  "Heads up: the presenter is clumsier than the weather today.",
+  "Nimbus is chasing his tail next to the radar. Try to ignore him.",
+  "I just sneezed during the satellite loop. Bless me.",
+  "If I mispronounce your county, take it up with my mouth, not me.",
+  "I waved at the radar and it waved back. I think we're friends now.",
+  "Dropped my pen, chased it under the desk, found three old forecasts down there.",
 ]);
 
 function buildAnnouncement(p) {
@@ -1760,6 +1785,8 @@ function chatterUpdate() {
       lastAllClear = now;
       if (Math.random() < 0.45) {
         queueSpeech(calmAside(), 60);
+      } else if (Math.random() < 0.5) {
+        queueSpeech(nextClumsy(), 60);
       } else {
         queueSpeech(nextAllClear(), 60);
       }
@@ -1786,6 +1813,9 @@ const nextAllClear = cycler([
   "Quiet across the board. No warnings, no watches. Just me, the radar, and Nimbus.",
   "The country's calm. Almost too calm. I'm watching anyway.",
   "All clear. I'll be here staring at the radar so you don't have to.",
+  "All clear nationwide. I'm going to try not to trip over anything while we wait.",
+  "Zero alerts. Nimbus is disappointed, I'm relieved, everybody wins.",
+  "Nothing happening anywhere. I double-checked so you don't have to trust my coordination.",
 ]);
 const nextCheckin = cycler([
   "Checking back in.",
@@ -1798,6 +1828,9 @@ const nextCheckin = cycler([
   "Situation update.",
   "Still tracking this.",
   "Circling back to this one.",
+  "Still here, still clumsy, still watching.",
+  "Quick check-in — I didn't break anything this time.",
+  "Back on this one. Nimbus sends his regards.",
 ]);
 function chatterMode() { return store.get("chatter", "chatty"); }
 
