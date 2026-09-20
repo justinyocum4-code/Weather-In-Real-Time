@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.1.2";
-const WRT_VERSION_CODE = 5;
+const WRT_VERSION = "1.2.0";
+const WRT_VERSION_CODE = 6;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -186,7 +186,7 @@ function ttsSpeak(text) {
     if ("speechSynthesis" in window) {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.0;
+      u.rate = 0.85;
       speechSynthesis.speak(u);
     }
   } catch (e) {}
@@ -203,7 +203,7 @@ function speakNext() {
   voice.currentScore = item.score;
   voice.lastSpokenScore = item.score;
   ttsSpeak(item.text);
-  const dur = Math.max(5000, item.text.length * 90 + 2000);
+  const dur = Math.max(6000, item.text.length * 120 + 3000);
   voice.timer = setTimeout(() => { voice.timer = null; speakNext(); }, dur);
 }
 
@@ -283,7 +283,7 @@ function requestLocation(done) {
 
 /* ============ Map / radar ============ */
 let map = null;
-let radarLayer = null;
+let radarLayers = [];
 
 function initMap() {
   if (typeof L === "undefined") {
@@ -300,6 +300,9 @@ function initMap() {
   setInterval(loadRadar, 5 * 60 * 1000);
 }
 
+let radarFrameIndex = 0;
+let radarAnimTimer = null;
+
 async function loadRadar() {
   if (!map) return;
   try {
@@ -307,10 +310,24 @@ async function loadRadar() {
     const data = await r.json();
     const past = data.radar && data.radar.past;
     if (!past || !past.length) return;
-    const latest = past[past.length - 1];
-    const url = "https://tilecache.rainviewer.com" + latest.path + "/256/{z}/{x}/{y}/2/1_1.png";
-    if (radarLayer) map.removeLayer(radarLayer);
-    radarLayer = L.tileLayer(url, { opacity: 0.65, zIndex: 10 }).addTo(map);
+    // Clear old frames.
+    for (const l of radarLayers) { try { map.removeLayer(l); } catch (e) {} }
+    if (radarAnimTimer) { clearInterval(radarAnimTimer); radarAnimTimer = null; }
+    radarLayers = [];
+    // Build one tile layer per frame (last 8 frames) and cycle them.
+    const frames = past.slice(-8);
+    for (const f of frames) {
+      const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/2/1_1.png";
+      radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10 }));
+    }
+    if (!radarLayers.length) return;
+    radarFrameIndex = 0;
+    radarLayers[0].addTo(map);
+    radarAnimTimer = setInterval(() => {
+      try { map.removeLayer(radarLayers[radarFrameIndex]); } catch (e) {}
+      radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
+      radarLayers[radarFrameIndex].addTo(map);
+    }, 900);
   } catch (e) {}
 }
 
@@ -415,8 +432,12 @@ function buildAnnouncement(p) {
   // Mention law-enforcement / spotter reports — they're often the key detail.
   const desc = p.description || "";
   const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
-  if (m) text += " Report: " + m[1];
-  if (text.length > 600) text = text.slice(0, 600) + ".";
+  if (m) {
+    let report = m[1];
+    if (report.length > 150) report = report.slice(0, 150) + ".";
+    text += " Report: " + report;
+  }
+  if (text.length > 300) text = text.slice(0, 300) + ".";
   return text;
 }
 
@@ -440,15 +461,14 @@ function recapAlerts() {
   queueSpeech(text, 999);
 }
 
-/* Startup: always speak on launch so the user knows the app is alive. */
+/* Startup: brief status only — never read warnings on open. New warnings
+   speak as they happen; the chatter recaps ongoing ones. */
 function announceStartup() {
-  const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
-  if (!feats.length) {
-    queueSpeech("Weather In Real Time. All clear. No active weather alerts in the United States right now.", 999);
+  const n = currentFeatures.length;
+  if (!n) {
+    queueSpeech("Weather In Real Time. All clear. No active weather alerts.", 999);
   } else {
-    const n = feats.length;
-    queueSpeech("Weather In Real Time. " + n + (n === 1 ? " active alert. " : " active alerts. ") +
-      buildAnnouncement(feats[0].properties || {}), 999);
+    queueSpeech("Weather In Real Time. " + n + (n === 1 ? " active alert right now." : " active alerts right now."), 999);
   }
 }
 
