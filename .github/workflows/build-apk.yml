@@ -238,7 +238,6 @@ jobs:
                                           @Override public void onDone(String utteranceId) { ttsDoneCallback(utteranceId); }
                                           @Override public void onError(String utteranceId) { ttsDoneCallback(utteranceId); }
                                           @Override public void onStop(String utteranceId, boolean interrupted) { ttsDoneCallback(utteranceId); }
-                                          @Override public void onStop(String utteranceId) { ttsDoneCallback(utteranceId); }
                                       });
                                   } catch (Exception ignored) {}
                                   if (pendingTts != null) {
