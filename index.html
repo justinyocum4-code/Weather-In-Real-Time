@@ -807,6 +807,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span id="loc-status">Location not set</span>
       <button type="button" class="toggle" id="btn-testvoice" style="min-width:140px;">Test voice</button>
     </div>
+    <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:10px;">
+      <span>Human voice (ElevenLabs, optional)</span>
+      <input type="password" id="el-key" placeholder="API key, starts with sk_" autocomplete="off" aria-label="ElevenLabs API key" style="font-size:18px;padding:14px;border-radius:10px;border:1px solid #666;background:#111;color:#fff;">
+      <input type="text" id="el-voice" placeholder="Voice ID" autocomplete="off" aria-label="ElevenLabs voice ID" style="font-size:18px;padding:14px;border-radius:10px;border:1px solid #666;background:#111;color:#fff;">
+      <div style="display:flex;gap:10px;">
+        <button type="button" class="toggle" id="btn-save-el" style="min-width:140px;">Save voice</button>
+        <button type="button" class="toggle" id="btn-test-el" style="min-width:140px;">Test voice</button>
+      </div>
+      <span id="el-status" style="font-size:14px;color:#999;">No human voice set. The built-in voice is used.</span>
+    </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by RainViewer.</p>
   </div>
 
@@ -824,8 +834,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.6";
-const WRT_VERSION_CODE = 22;
+const WRT_VERSION = "2.0.7";
+const WRT_VERSION_CODE = 23;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -920,6 +930,12 @@ function ttsSpeak(text) {
   bar.textContent = "Now announcing: " + text;
   bar.style.display = "block";
   try {
+    if (typeof ElevenLabs !== "undefined" && ElevenLabs.hasCredentials && ElevenLabs.hasCredentials()) {
+      const id = ElevenLabs.speak(text);
+      if (id) return id; // native falls back to the built-in voice on any error
+    }
+  } catch (e) {}
+  try {
     if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
       return LynxosTts.speak(text) || null; // native returns the utterance id
     }
@@ -938,6 +954,7 @@ function ttsSpeak(text) {
 
 function ttsStop() {
   try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
+  try { if (typeof ElevenLabs !== "undefined" && ElevenLabs.stop) ElevenLabs.stop(); } catch (e) {}
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
 }
 
@@ -2190,6 +2207,41 @@ document.getElementById("btn-relocate").addEventListener("click", () => {
 
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("This is Weather In Real Time. The voice is working.", 999);
+});
+
+/* ElevenLabs human-voice setup. The key and voice ID live only in this
+   phone's private storage — they are never uploaded anywhere. */
+function refreshElStatus() {
+  const el = document.getElementById("el-status");
+  if (!el) return;
+  try {
+    if (typeof ElevenLabs !== "undefined" && ElevenLabs.hasCredentials && ElevenLabs.hasCredentials()) {
+      el.textContent = "Human voice is on. When the free minutes run out, the built-in voice takes over.";
+      el.style.color = "#7fd67f";
+    } else {
+      el.textContent = "No human voice set. The built-in voice is used.";
+      el.style.color = "#999";
+    }
+  } catch (e) {}
+}
+document.getElementById("btn-save-el").addEventListener("click", () => {
+  const k = document.getElementById("el-key").value.trim();
+  const v = document.getElementById("el-voice").value.trim();
+  if (!k || !v) { queueSpeech("Paste both the API key and the voice ID first.", 999); return; }
+  try { ElevenLabs.setCredentials(k, v); } catch (e) {}
+  try { localStorage.setItem("wrt_el_key", k); localStorage.setItem("wrt_el_voice", v); } catch (e) {}
+  refreshElStatus();
+  queueSpeech("Human voice saved.", 999);
+});
+document.getElementById("btn-test-el").addEventListener("click", () => {
+  queueSpeech("This is Weather In Real Time, with my new human voice.", 999);
+});
+document.getElementById("btn-settings").addEventListener("click", () => {
+  try {
+    document.getElementById("el-key").value = localStorage.getItem("wrt_el_key") || "";
+    document.getElementById("el-voice").value = localStorage.getItem("wrt_el_voice") || "";
+  } catch (e) {}
+  refreshElStatus();
 });
 
 document.getElementById("btn-enable-loc").addEventListener("click", () => {
