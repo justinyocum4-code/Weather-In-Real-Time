@@ -83,6 +83,7 @@
     <button type="button" id="btn-mute" aria-pressed="false">Mute voice</button>
     <button type="button" id="btn-myarea">My area</button>
     <button type="button" id="btn-alerts">Alerts</button>
+    <button type="button" id="btn-recap">Recap</button>
     <button type="button" id="btn-settings">Settings</button>
   </div>
 
@@ -102,6 +103,10 @@
     <div class="setting-row">
       <span>Quiet hours (10pm–7am, major warnings only)</span>
       <button type="button" class="toggle" id="tgl-quiet" aria-pressed="true">On</button>
+    </div>
+    <div class="setting-row">
+      <span>Voice chatter (regular updates)</span>
+      <button type="button" class="toggle" id="tgl-chatter" aria-pressed="true" style="min-width:140px;">Chatty</button>
     </div>
     <div class="setting-row">
       <span>Location</span>
@@ -128,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.0.1";
-const WRT_VERSION_CODE = 2;
+const WRT_VERSION = "1.1.0";
+const WRT_VERSION_CODE = 3;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -404,6 +409,9 @@ function buildAnnouncement(p) {
   const area = p.areaDesc || "";
   const headline = p.headline || "";
   let text = event + ". " + area + ". " + headline;
+  // Storm motion — "moving northeast at 40 mph" keeps the voice informative.
+  const motion = extractMotion(p.description || "");
+  if (motion) text += " Storm motion: " + motion + ".";
   // Mention law-enforcement / spotter reports — they're often the key detail.
   const desc = p.description || "";
   const m = desc.match(/([^.]*?(?:law enforcement|trained spotter|emergency management|public)[^.]*\.)/i);
@@ -411,6 +419,48 @@ function buildAnnouncement(p) {
   if (text.length > 600) text = text.slice(0, 600) + ".";
   return text;
 }
+
+function extractMotion(desc) {
+  const m = desc.match(/moving\s+(north|northeast|east|southeast|south|southwest|west|northwest)(?:\s+at\s+(\d+)\s*mph)?/i);
+  if (m) return m[2] ? ("moving " + m[1] + " at " + m[2] + " miles per hour") : ("moving " + m[1]);
+  return null;
+}
+
+/* Recap: read out everything currently active, most severe first. */
+function recapAlerts() {
+  const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+  if (!feats.length) {
+    queueSpeech("Recap. No active weather alerts anywhere in the United States right now.", 999);
+    return;
+  }
+  const top = feats.slice(0, 5);
+  let text = "Recap. " + feats.length + " active alerts nationwide. The most severe: ";
+  text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {})).join(" ");
+  if (feats.length > 5) text += " Plus " + (feats.length - 5) + " more alerts in the list.";
+  queueSpeech(text, 999);
+}
+
+/* Chatter: keep the voice busy with periodic updates. */
+let chatterIndex = 0;
+let lastAllClear = 0;
+function chatterUpdate() {
+  if (chatterMode() === "off") return;
+  const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+  if (!feats.length) {
+    const now = Date.now();
+    if (now - lastAllClear > 15 * 60000) {
+      lastAllClear = now;
+      queueSpeech("All clear. No active weather alerts in the United States. Still monitoring.", 60);
+    }
+    return;
+  }
+  if (chatterMode() === "chatty") {
+    const f = feats[chatterIndex % feats.length];
+    chatterIndex++;
+    queueSpeech("Update. " + buildAnnouncement(f.properties || {}), 60);
+  }
+}
+function chatterMode() { return store.get("chatter", "chatty"); }
 
 /* ============ Alerts polling ============ */
 const seenAlertIds = new Set();
@@ -564,6 +614,23 @@ document.getElementById("btn-settings").addEventListener("click", () => {
 document.getElementById("btn-close-settings").addEventListener("click", () => {
   document.getElementById("settings-panel").hidden = true;
 });
+document.getElementById("btn-recap").addEventListener("click", () => {
+  recapAlerts();
+});
+
+function syncChatterToggle() {
+  const mode = chatterMode();
+  const t = document.getElementById("tgl-chatter");
+  t.setAttribute("aria-pressed", String(mode !== "off"));
+  t.textContent = mode === "chatty" ? "Chatty" : mode === "normal" ? "Normal" : "Off";
+}
+document.getElementById("tgl-chatter").addEventListener("click", () => {
+  const mode = chatterMode();
+  const next = mode === "chatty" ? "normal" : mode === "normal" ? "off" : "chatty";
+  store.set("chatter", next);
+  syncChatterToggle();
+  queueSpeech("Voice chatter " + (next === "chatty" ? "chatty. Regular updates every few minutes." : next === "normal" ? "normal. New alerts only." : "off."), 999);
+});
 
 function syncVoiceToggle() {
   const t = document.getElementById("tgl-voice");
@@ -628,6 +695,7 @@ function tickClock() {
 document.getElementById("app-version").textContent = WRT_VERSION;
 syncVoiceToggle();
 syncQuietToggle();
+syncChatterToggle();
 updateLocStatus();
 tickClock();
 setInterval(tickClock, 30000);
@@ -639,6 +707,7 @@ if (store.get("welcomed", "") !== "1") {
   pollAlerts();
 }
 setInterval(pollAlerts, 60000);
+setInterval(chatterUpdate, 180000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) pollAlerts();
 });
