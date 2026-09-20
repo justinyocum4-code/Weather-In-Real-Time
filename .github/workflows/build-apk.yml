@@ -76,7 +76,7 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
-                  maven { url "https://jitpack.io" } // sherpa-onnx (Piper voice engine)
+                  maven { url "https://jitpack.io" } // sherpa-onnx (Kokoro voice engine)
               }
           }
           rootProject.name = "WeatherRealtime"
@@ -106,7 +106,8 @@ jobs:
                   }
               }
               dependencies {
-                  // On-device AI voice (Piper via sherpa-onnx). Official build, re-published by JitPack.
+                  // On-device AI voice (Kokoro via sherpa-onnx). Official build, re-published by JitPack.
+                  // v1.12.40 already includes Kokoro TTS support (added in sherpa-onnx 1.10.42).
                   implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.40'
               }
           }
@@ -163,13 +164,13 @@ jobs:
               private boolean ttsReady = false;
               private String pendingTts = null;
               private int ttsUtteranceSeq = 0;
-              // Piper on-device AI voice (sherpa-onnx): unlimited, offline.
+              // Kokoro on-device AI voice (sherpa-onnx): unlimited, offline.
               // This is the app's only voice — it speaks every announcement.
-              private com.k2fsa.sherpa.onnx.OfflineTts piperTts = null;
-              private volatile boolean piperReady = false;
-              private volatile boolean piperStarting = false;
-              private volatile int piperGen = 0; // invalidates in-flight Piper synthesis/playback on stop
-              private volatile android.media.AudioTrack piperTrack = null;
+              private com.k2fsa.sherpa.onnx.OfflineTts kokoroTts = null;
+              private volatile boolean kokoroReady = false;
+              private volatile boolean kokoroStarting = false;
+              private volatile int kokoroGen = 0; // invalidates in-flight Kokoro synthesis/playback on stop
+              private volatile android.media.AudioTrack kokoroTrack = null;
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -238,7 +239,7 @@ jobs:
                       }
                   }, "LynxosStore");
                   initTts();
-                  piperEnsureInit(); // warm up the offline AI voice in the background
+                  kokoroEnsureInit(); // warm up the offline AI voice in the background
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public String speak(String text) {
@@ -254,7 +255,7 @@ jobs:
                       }
                   }, "LynxosTts");
 
-                  /* Piper on-device AI voice: the app's only voice. Unlimited
+                  /* Kokoro on-device AI voice: the app's only voice. Unlimited
                      and offline — no key, no quota. Returns an utterance id,
                      or null when the voice isn't warmed up yet (the page then
                      falls through to the built-in voice). Synthesis runs on a
@@ -265,70 +266,76 @@ jobs:
                       public String speak(String text) {
                           try {
                               if (text == null || text.isEmpty()) return null;
-                              if (!piperReady || piperTts == null) { piperEnsureInit(); return null; }
-                              piperGen++; // silence anything currently playing
-                              try { android.media.AudioTrack tr = piperTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
-                              final String id = "pv" + (++ttsUtteranceSeq);
-                              final int gen = piperGen;
+                              if (!kokoroReady || kokoroTts == null) { kokoroEnsureInit(); return null; }
+                              kokoroGen++; // silence anything currently playing
+                              try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                              final String id = "kv" + (++ttsUtteranceSeq);
+                              final int gen = kokoroGen;
                               final String t = text;
                               new Thread(new Runnable() { @Override public void run() {
-                                  piperSpeakWorker(id, t, gen);
+                                  kokoroSpeakWorker(id, t, gen);
                               } }).start();
                               return id;
                           } catch (Throwable th) { return null; }
                       }
                       @JavascriptInterface
                       public void stop() {
-                          piperGen++;
-                          try { android.media.AudioTrack tr = piperTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                          kokoroGen++;
+                          try { android.media.AudioTrack tr = kokoroTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
                       }
-                  }, "PiperVoice");
+                  }, "KokoroVoice");
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
                   setContentView(webView);
                   webView.requestFocus();
               }
-              /* Copy the bundled Piper voice out of the APK into private
+              /* Copy the bundled Kokoro voice out of the APK into private
                  storage (native code needs real file paths), then build
                  the sherpa-onnx TTS engine on a worker thread. */
-              private void piperEnsureInit() {
-                  if (piperReady || piperStarting) return;
-                  piperStarting = true;
+              private void kokoroEnsureInit() {
+                  if (kokoroReady || kokoroStarting) return;
+                  kokoroStarting = true;
                   new Thread(new Runnable() { @Override public void run() {
                       try {
-                          java.io.File dest = new java.io.File(getFilesDir(), "piper-voice");
+                          java.io.File dest = new java.io.File(getFilesDir(), "kokoro-voice");
                           java.io.File marker = new java.io.File(dest, ".ready");
                           if (!marker.exists()) {
                               deleteRecursive(dest);
-                              copyAssetDir("piper-voice", dest);
+                              copyAssetDir("kokoro-voice", dest);
                               marker.createNewFile();
                           }
                           java.io.File modelFile = findFirstEndingWith(dest, ".onnx", ".onnx.json");
+                          java.io.File voicesFile = findFirstEndingWith(dest, "voices.bin", null);
                           java.io.File tokensFile = findFirstEndingWith(dest, "tokens.txt", null);
+                          java.io.File lexiconFile = findFirstEndingWith(dest, "lexicon-us-en.txt", null);
                           java.io.File dataDir = findDirNamed(dest, "espeak-ng-data");
-                          if (modelFile == null || tokensFile == null) throw new RuntimeException("piper model not found");
+                          if (modelFile == null || voicesFile == null || tokensFile == null)
+                              throw new RuntimeException("kokoro model not found");
                           // sherpa-onnx Java API: no-arg constructors + setters
                           // (per the official sherpa-onnx TTS docs). The Android
                           // OfflineTts takes the app AssetManager plus config;
                           // absolute file paths are resolved as real files.
-                          com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig vits =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig();
-                          vits.setModel(modelFile.getAbsolutePath());
-                          vits.setTokens(tokensFile.getAbsolutePath());
-                          vits.setDataDir(dataDir != null ? dataDir.getAbsolutePath() : "");
+                          // Voice: am_michael (sid 16), American male.
+                          com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig kokoro =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig();
+                          kokoro.setModel(modelFile.getAbsolutePath());
+                          kokoro.setVoices(voicesFile.getAbsolutePath());
+                          kokoro.setTokens(tokensFile.getAbsolutePath());
+                          kokoro.setDataDir(dataDir != null ? dataDir.getAbsolutePath() : "");
+                          if (lexiconFile != null) kokoro.setLexicon(lexiconFile.getAbsolutePath());
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
                               new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
-                          modelConfig.setVits(vits);
+                          modelConfig.setKokoro(kokoro);
                           modelConfig.setNumThreads(2);
                           com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
-                          piperTts = new com.k2fsa.sherpa.onnx.OfflineTts(getAssets(), config);
-                          try { piperTts.generate("Voice ready.", 0, 1.0f); } catch (Throwable ignored) {} // warm-up
-                          piperReady = true;
+                          kokoroTts = new com.k2fsa.sherpa.onnx.OfflineTts(getAssets(), config);
+                          try { kokoroTts.generate("Voice ready.", 16, 1.0f); } catch (Throwable ignored) {} // warm-up
+                          kokoroReady = true;
                       } catch (Throwable t) {
-                          piperStarting = false; // let a later speak() retry
+                          kokoroStarting = false; // let a later speak() retry
                       }
                   } }).start();
               }
@@ -337,10 +344,11 @@ jobs:
                  newer utterance always wins. Fires __onTtsDone exactly
                  once per completed utterance; a stale generation exits
                  silently because its replacement owns the queue now. */
-              private void piperSpeakWorker(String id, String text, int gen) {
+              private void kokoroSpeakWorker(String id, String text, int gen) {
                   try {
-                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = piperTts.generate(text, 0, 1.0f);
-                      if (gen != piperGen) return;
+                      // sid 16 = am_michael, the app's American male voice.
+                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = kokoroTts.generate(text, 16, 1.0f);
+                      if (gen != kokoroGen) return;
                       float[] samples = audio.getSamples();
                       int sampleRate = audio.getSampleRate();
                       if (samples == null || samples.length == 0 || sampleRate <= 0) {
@@ -363,18 +371,18 @@ jobs:
                           android.media.AudioFormat.CHANNEL_OUT_MONO,
                           android.media.AudioFormat.ENCODING_PCM_16BIT,
                           Math.max(minBuf, 8192), android.media.AudioTrack.MODE_STREAM);
-                      piperTrack = track;
+                      kokoroTrack = track;
                       track.play();
                       int off = 0;
-                      while (off < pcm.length && gen == piperGen) {
+                      while (off < pcm.length && gen == kokoroGen) {
                           int len = Math.min(8192, pcm.length - off);
                           track.write(pcm, off, len);
                           off += len;
                       }
                       try { track.stop(); } catch (Throwable ignored) {}
                       try { track.release(); } catch (Throwable ignored) {}
-                      if (piperTrack == track) piperTrack = null;
-                      if (gen == piperGen) jsCall("window.__onTtsDone('" + id + "')");
+                      if (kokoroTrack == track) kokoroTrack = null;
+                      if (gen == kokoroGen) jsCall("window.__onTtsDone('" + id + "')");
                   } catch (Throwable t) {
                       // Claimed the utterance but couldn't render it:
                       // advance the queue rather than stalling it.
@@ -557,21 +565,23 @@ jobs:
           }
           EOF
 
-      - name: Download Piper voice model (offline AI fallback voice)
+      - name: Download Kokoro voice model (offline AI voice)
         run: |
           set -e
-          mkdir -p app/src/main/assets/piper-voice
-          cd app/src/main/assets/piper-voice
+          mkdir -p app/src/main/assets/kokoro-voice
+          cd app/src/main/assets/kokoro-voice
           # Official sherpa-onnx TTS release (per the sherpa-onnx docs):
-          # vits-piper-en_US-lessac-medium, a male US-English voice. The
-          # tarball already contains espeak-ng-data/, so one download is
-          # all the app needs. Extracted into the APK assets, copied to
-          # private storage on first launch, and spoken through the
-          # PiperVoice native bridge for every announcement.
-          curl -fSL --retry 3 -o piper-voice.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2"
-          tar -xjf piper-voice.tar.bz2
-          rm piper-voice.tar.bz2
-          echo "Piper voice assets:"
+          # kokoro-int8-multi-lang-v1_0 — a much more natural-sounding
+          # on-device voice (Apache 2.0, free to bundle). The tarball
+          # contains model.int8.onnx, voices.bin, tokens.txt, lexicon
+          # files and espeak-ng-data/. Extracted into the APK assets,
+          # copied to private storage on first launch, and spoken through
+          # the KokoroVoice native bridge for every announcement.
+          # am_michael (sid 16) is the app's American male voice.
+          curl -fSL --retry 3 -o kokoro-voice.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2"
+          tar -xjf kokoro-voice.tar.bz2
+          rm kokoro-voice.tar.bz2
+          echo "Kokoro voice assets:"
           find . -type f | head -20
           du -sh .
 
