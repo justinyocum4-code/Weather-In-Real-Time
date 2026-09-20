@@ -807,15 +807,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span id="loc-status">Location not set</span>
       <button type="button" class="toggle" id="btn-testvoice" style="min-width:140px;">Test voice</button>
     </div>
-    <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:10px;">
-      <span>Human voice (ElevenLabs, optional)</span>
-      <input type="password" id="el-key" placeholder="API key, starts with sk_" autocomplete="off" aria-label="ElevenLabs API key" style="font-size:18px;padding:14px;border-radius:10px;border:1px solid #666;background:#111;color:#fff;">
-      <input type="text" id="el-voice" placeholder="Voice ID" autocomplete="off" aria-label="ElevenLabs voice ID" style="font-size:18px;padding:14px;border-radius:10px;border:1px solid #666;background:#111;color:#fff;">
-      <div style="display:flex;gap:10px;">
-        <button type="button" class="toggle" id="btn-save-el" style="min-width:140px;">Save voice</button>
-        <button type="button" class="toggle" id="btn-test-el" style="min-width:140px;">Test voice</button>
-      </div>
-      <span id="el-status" style="font-size:14px;color:#999;">No human voice set. The built-in voice is used.</span>
+    <div class="setting-row">
+      <span>Voice</span>
+      <span style="font-size:14px;color:#7fd67f;">Built-in AI voice — always on, works offline</span>
     </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by RainViewer.</p>
   </div>
@@ -834,8 +828,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.3.0";
-const WRT_VERSION_CODE = 29;
+const WRT_VERSION = "2.4.0";
+const WRT_VERSION_CODE = 30;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -923,72 +917,31 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
+/* The voice, forever: Piper, the on-device AI voice. Unlimited,
+   offline, no key, no quota — it simply speaks. It reports completion
+   with the id its native speak() returned. The built-in device voice is
+   an emergency backup if Piper isn't warmed up yet. */
+let utteranceSeq = 0;
+const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
   text = expandStates(text);
   voice.lastSpoken = text;
   const bar = document.getElementById("announce-bar");
   bar.textContent = "Now announcing: " + text;
   bar.style.display = "block";
-  try {
-    if (typeof ElevenLabs !== "undefined" && ElevenLabs.hasCredentials && ElevenLabs.hasCredentials()) {
-      const id = ElevenLabs.speak(text); // fetch only; MP3 arrives via __onElMp3
-      if (id) { elPending[id] = text; return id; }
-    }
-  } catch (e) {}
-  try {
-    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
-      return LynxosTts.speak(text) || null; // native returns the utterance id
-    }
-  } catch (e) {}
-  try {
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 0.7;
-      if (bestVoice) u.voice = bestVoice;
-      speechSynthesis.speak(u);
-    }
-  } catch (e) {}
-  return null;
-}
-
-/* Cloud-voice MP3 playback through the WebView's own <audio> element —
-   no native MediaPlayer involved. */
-const elPending = {}; // id -> text, waiting for the MP3 download
-const elAudio = {};   // id -> Audio element currently playing
-function elCleanup(id) {
-  try { const a = elAudio[id]; if (a) { a.pause(); a.src = ""; } } catch (e) {}
-  delete elAudio[id];
-  delete elPending[id];
-}
-/* Belt and suspenders: when a new utterance starts sounding, any other
-   cloud audio still playing is stale — silence it so voices can't overlap. */
-function elSilenceOthers(keepId) {
-  try {
-    for (const id of Object.keys(elAudio)) {
-      if (id !== keepId) elCleanup(id);
-    }
-  } catch (e) {}
-}
-/* Built-in voice fallback, keeping the SAME utterance id so the presenter
-   queue advances exactly once. */
-const elIdMap = {}; // native/fallback utterance id -> our ElevenLabs id
-function elFallbackSpeak(text, id) {
-  elCleanup(id);
-  elSilenceOthers(id);
-  // Piper (on-device AI voice) first — unlimited, offline, human-sounding.
+  const id = "s" + (++utteranceSeq);
   try {
     if (typeof PiperVoice !== "undefined" && PiperVoice.speak) {
       const pid = PiperVoice.speak(text);
-      if (pid) { elIdMap[pid] = id; return; }
+      if (pid) { pvIdMap[pid] = id; return id; }
     }
   } catch (e) {}
   try {
     if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
       const nid = LynxosTts.speak(text);
-      if (nid) elIdMap[nid] = id; // translate the native done-callback to ours
+      if (nid) pvIdMap[nid] = id;
       else window.__onTtsDone(id);
-      return;
+      return id;
     }
   } catch (e) {}
   try {
@@ -1000,37 +953,18 @@ function elFallbackSpeak(text, id) {
       u.onend = () => window.__onTtsDone(id);
       u.onerror = () => window.__onTtsDone(id);
       speechSynthesis.speak(u);
-      return;
+      return id;
     }
   } catch (e) {}
   window.__onTtsDone(id);
+  return id;
 }
-window.__onElMp3 = function (id, url) {
-  const text = elPending[id];
-  if (text == null) return;
-  try {
-    elCleanup(id);
-    elSilenceOthers(id);
-    const a = new Audio(url);
-    elAudio[id] = a;
-    a.onended = () => { elCleanup(id); window.__onTtsDone(id); };
-    a.onerror = () => elFallbackSpeak(text, id);
-    const pr = a.play();
-    if (pr && pr.catch) pr.catch(() => elFallbackSpeak(text, id));
-  } catch (e) { elFallbackSpeak(text, id); }
-};
-window.__onElFail = function (id) {
-  const text = elPending[id];
-  if (text == null) { window.__onTtsDone(id); return; }
-  elFallbackSpeak(text, id);
-};
+
+
 
 function ttsStop() {
-  try { for (const id of Object.keys(elAudio)) elCleanup(id); } catch (e) {}
-  try { for (const id of Object.keys(elPending)) delete elPending[id]; } catch (e) {}
   try { if (typeof PiperVoice !== "undefined" && PiperVoice.stop) PiperVoice.stop(); } catch (e) {}
   try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
-  try { if (typeof ElevenLabs !== "undefined" && ElevenLabs.stop) ElevenLabs.stop(); } catch (e) {}
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
 }
 
@@ -1081,13 +1015,9 @@ const presenter = {
       const id = ttsSpeak(item.text);
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
-      // finished-callback never arrives. Cloud-voice utterances ("el" ids)
-      // need much more headroom — the MP3 downloads first, THEN plays.
-      // Too-short timers were firing mid-utterance and piling voices up.
-      const cloud = id && id.indexOf("el") === 0;
-      const ms = cloud
-        ? Math.min(180000, 20000 + item.text.length * 150)
-        : Math.min(120000, Math.max(10000, item.text.length * 85));
+      // finished-callback never arrives. Piper synthesizes on-device in
+      // about a second, so this timer only needs to cover playback.
+      const ms = Math.min(120000, Math.max(10000, item.text.length * 85));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
     };
@@ -1131,7 +1061,7 @@ window.addEventListener("error", (e) => {
 
 /* Native TTS finished-callback target. */
 window.__onTtsDone = function (id) {
-  if (id && elIdMap[id]) { id = elIdMap[id]; delete elIdMap[id]; }
+  if (id && pvIdMap[id]) { id = pvIdMap[id]; delete pvIdMap[id]; }
   presenter.onUtteranceDone(id);
 };
 
@@ -2446,40 +2376,7 @@ document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("This is Weather In Real Time. The voice is working.", 999);
 });
 
-/* ElevenLabs human-voice setup. The key and voice ID live only in this
-   phone's private storage — they are never uploaded anywhere. */
-function refreshElStatus() {
-  const el = document.getElementById("el-status");
-  if (!el) return;
-  try {
-    if (typeof ElevenLabs !== "undefined" && ElevenLabs.hasCredentials && ElevenLabs.hasCredentials()) {
-      el.textContent = "Human voice is on. When the free minutes run out, the built-in voice takes over.";
-      el.style.color = "#7fd67f";
-    } else {
-      el.textContent = "No human voice set. The built-in voice is used.";
-      el.style.color = "#999";
-    }
-  } catch (e) {}
-}
-document.getElementById("btn-save-el").addEventListener("click", () => {
-  const k = document.getElementById("el-key").value.trim();
-  const v = document.getElementById("el-voice").value.trim();
-  if (!k || !v) { queueSpeech("Paste both the API key and the voice ID first.", 999); return; }
-  try { ElevenLabs.setCredentials(k, v); } catch (e) {}
-  try { localStorage.setItem("wrt_el_key", k); localStorage.setItem("wrt_el_voice", v); } catch (e) {}
-  refreshElStatus();
-  queueSpeech("Human voice saved.", 999);
-});
-document.getElementById("btn-test-el").addEventListener("click", () => {
-  queueSpeech("This is Weather In Real Time, with my new human voice.", 999);
-});
-document.getElementById("btn-settings").addEventListener("click", () => {
-  try {
-    document.getElementById("el-key").value = localStorage.getItem("wrt_el_key") || "";
-    document.getElementById("el-voice").value = localStorage.getItem("wrt_el_voice") || "";
-  } catch (e) {}
-  refreshElStatus();
-});
+
 
 document.getElementById("btn-enable-loc").addEventListener("click", () => {
   requestLocation((ok) => {
