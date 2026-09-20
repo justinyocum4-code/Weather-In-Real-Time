@@ -94,19 +94,12 @@ jobs:
           android {
               namespace 'com.weatherrealtime.app'
               compileSdk 34
-              buildFeatures {
-                  buildConfig = true
-              }
               defaultConfig {
                   applicationId 'com.weatherrealtime.app'
                   minSdk 24
                   targetSdk 34
                   versionCode __APP_VERSION_CODE__
                   versionName '__APP_VERSION_NAME__'
-                  def elKey = System.getenv("EL_API_KEY") ?: ""
-                  def elVoice = System.getenv("EL_VOICE_ID") ?: ""
-                  buildConfigField "String", "EL_API_KEY", '"' + elKey.replace('\\', '\\\\').replace('"', '\\"') + '"'
-                  buildConfigField "String", "EL_VOICE_ID", '"' + elVoice.replace('\\', '\\\\').replace('"', '\\"') + '"'
                   ndk {
                       // Phone + Android TV / Fire TV sticks. x86_64 (emulators) dropped to save size.
                       abiFilters 'arm64-v8a', 'armeabi-v7a'
@@ -170,9 +163,8 @@ jobs:
               private boolean ttsReady = false;
               private String pendingTts = null;
               private int ttsUtteranceSeq = 0;
-              private int elGen = 0; // invalidates in-flight ElevenLabs fetches on stop
-              // Piper on-device AI voice (sherpa-onnx): unlimited, offline,
-              // human-sounding fallback when the ElevenLabs cloud voice fails.
+              // Piper on-device AI voice (sherpa-onnx): unlimited, offline.
+              // This is the app's only voice — it speaks every announcement.
               private com.k2fsa.sherpa.onnx.OfflineTts piperTts = null;
               private volatile boolean piperReady = false;
               private volatile boolean piperStarting = false;
@@ -258,75 +250,14 @@ jobs:
                       @JavascriptInterface
                       public void stop() {
                           pendingTts = null;
-                          elGen++;
                           try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
                       }
                   }, "LynxosTts");
-                  /* ElevenLabs cloud voice. The key + voice id live only in
-                     native code / this phone's private storage — they never
-                     reach the page. Speech is fetched as MP3 over HTTPS on a
-                     worker thread and handed to the page as a local file URL;
-                     the page plays it with an <audio> element. On ANY failure
-                     (no network, bad key, monthly free minutes used up) the
-                     page falls back to the built-in Google voice with the SAME
-                     utterance id, so the presenter queue never stalls. */
-                  webView.addJavascriptInterface(new Object() {
-                      @JavascriptInterface
-                      public boolean hasCredentials() {
-                          try {
-                              android.content.SharedPreferences p = getSharedPreferences("weather_realtime", MODE_PRIVATE);
-                              String k = p.getString("el_key", "");
-                              String v = p.getString("el_voice", "");
-                              if (k != null && !k.isEmpty() && v != null && !v.isEmpty()) return true;
-                          } catch (Exception e) {}
-                          try {
-                              return BuildConfig.EL_API_KEY != null && !BuildConfig.EL_API_KEY.isEmpty()
-                                  && BuildConfig.EL_VOICE_ID != null && !BuildConfig.EL_VOICE_ID.isEmpty();
-                          } catch (Exception e) { return false; }
-                      }
-                      @JavascriptInterface
-                      public void setCredentials(String key, String voiceId) {
-                          try {
-                              getSharedPreferences("weather_realtime", MODE_PRIVATE).edit()
-                                  .putString("el_key", key == null ? "" : key.trim())
-                                  .putString("el_voice", voiceId == null ? "" : voiceId.trim())
-                                  .putString("el_month", "")
-                                  .putInt("el_credits_used", 0)
-                                  .apply();
-                          } catch (Exception ignored) {}
-                      }
-                      @JavascriptInterface
-                      public void clearCredentials() {
-                          try {
-                              getSharedPreferences("weather_realtime", MODE_PRIVATE).edit()
-                                  .remove("el_key").remove("el_voice").apply();
-                          } catch (Exception ignored) {}
-                      }
-                      @JavascriptInterface
-                      public String speak(String text) {
-                          try {
-                              if (text == null || text.isEmpty()) return null;
-                              elGen++;
-                              try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
-                              final String id = "el" + (++ttsUtteranceSeq);
-                              final int gen = elGen;
-                              final String t = text;
-                              new Thread(new Runnable() { @Override public void run() {
-                                  try { elevenLabsFetch(id, t, gen); } catch (Throwable th) { jsCall("window.__onElFail('" + id + "')"); }
-                              } }).start();
-                              return id;
-                          } catch (Throwable t) { return null; }
-                      }
-                      @JavascriptInterface
-                      public void stop() {
-                          elGen++;
-                      }
-                  }, "ElevenLabs");
-                  /* Piper on-device AI voice. Unlimited and offline: when the
-                     ElevenLabs cloud voice fails, the page tries this BEFORE
-                     the robotic built-in voice. Returns an utterance id, or
-                     null when the voice isn't warmed up yet (the page then
-                     falls through to the next fallback). Synthesis runs on a
+
+                  /* Piper on-device AI voice: the app's only voice. Unlimited
+                     and offline — no key, no quota. Returns an utterance id,
+                     or null when the voice isn't warmed up yet (the page then
+                     falls through to the built-in voice). Synthesis runs on a
                      worker thread; playback goes through one serialized
                      AudioTrack so utterances can never double up. */
                   webView.addJavascriptInterface(new Object() {
@@ -571,72 +502,6 @@ jobs:
                       if (best != null) { try { tts.setVoice(best); } catch (Exception ignored) {} }
                   } catch (Exception ignored) {}
               }
-              private String jsonQuote(String s) {
-                  StringBuilder b = new StringBuilder("\"");
-                  for (int i = 0; i < s.length(); i++) {
-                      char ch = s.charAt(i);
-                      if (ch == '"') b.append("\\\"");
-                      else if (ch == '\\') b.append("\\\\");
-                      else if (ch == '\n') b.append("\\n");
-                      else if (ch == '\r') b.append("\\r");
-                      else if (ch < 0x20) b.append(String.format("\\u%04x", (int) ch));
-                      else b.append(ch);
-                  }
-                  return b.append("\"").toString();
-              }
-              private void elevenLabsFetch(final String id, final String text, final int gen) {
-                  boolean fetched = false;
-                  String path = null;
-                  try {
-                      android.content.SharedPreferences p = getSharedPreferences("weather_realtime", MODE_PRIVATE);
-                      String key = p.getString("el_key", "");
-                      String voiceId = p.getString("el_voice", "");
-                      if (key == null || key.isEmpty()) { try { key = BuildConfig.EL_API_KEY; } catch (Exception ignored) {} }
-                      if (voiceId == null || voiceId.isEmpty()) { try { voiceId = BuildConfig.EL_VOICE_ID; } catch (Exception ignored) {} }
-                      if (key == null || key.isEmpty() || voiceId == null || voiceId.isEmpty()) throw new Exception("no creds");
-                      if (gen != elGen) return;
-                      // Monthly free-minute guard. Turbo costs 0.5 credits/char;
-                      // stay under ~9.5k credits so speech never cuts out mid-day.
-                      String month = new java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US).format(new java.util.Date());
-                      int used = month.equals(p.getString("el_month", "")) ? p.getInt("el_credits_used", 0) : 0;
-                      p.edit().putString("el_month", month).putInt("el_credits_used", used).apply();
-                      int cost = (int) Math.ceil(text.length() * 0.5);
-                      if (used + cost > 9500) throw new Exception("quota guard");
-                      java.net.URL url = new java.net.URL("https://api.elevenlabs.io/v1/text-to-speech/" + voiceId.trim());
-                      java.net.HttpURLConnection c = (java.net.HttpURLConnection) url.openConnection();
-                      c.setRequestMethod("POST");
-                      c.setConnectTimeout(12000);
-                      c.setReadTimeout(30000);
-                      c.setDoOutput(true);
-                      c.setRequestProperty("xi-api-key", key);
-                      c.setRequestProperty("Content-Type", "application/json");
-                      c.setRequestProperty("Accept", "audio/mpeg");
-                      String body = "{\"text\":" + jsonQuote(text) + ",\"model_id\":\"eleven_turbo_v2_5\",\"voice_settings\":{\"stability\":0.5,\"similarity_boost\":0.75}}";
-                      byte[] bb = body.getBytes("UTF-8");
-                      java.io.OutputStream os = c.getOutputStream();
-                      os.write(bb); os.flush(); os.close();
-                      int rc = c.getResponseCode();
-                      if (rc < 200 || rc >= 300) throw new Exception("http " + rc);
-                      int charged = cost;
-                      try { charged = (int) Math.ceil(Integer.parseInt(c.getHeaderField("x-character-count").trim()) * 0.5); } catch (Exception ignored) {}
-                      java.io.File f = java.io.File.createTempFile("eltts", ".mp3", getCacheDir());
-                      java.io.InputStream in = c.getInputStream();
-                      java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
-                      byte[] buf = new byte[8192];
-                      int n;
-                      while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
-                      fos.close(); in.close();
-                      path = f.getAbsolutePath();
-                      p.edit().putInt("el_credits_used", used + charged).apply();
-                      fetched = true;
-                  } catch (Exception e) { fetched = false; }
-                  if (gen != elGen) return; // stopped while fetching
-                  if (fetched && path != null) {
-                      jsCall("window.__onElMp3('" + id + "'," + jsonQuote("file://" + path) + ")");
-                  } else {
-                      jsCall("window.__onElFail('" + id + "')");
-                  }
-              }
               private void jsCall(final String expr) {
                   try {
                       final WebView wv = webView;
@@ -702,7 +567,7 @@ jobs:
           # tarball already contains espeak-ng-data/, so one download is
           # all the app needs. Extracted into the APK assets, copied to
           # private storage on first launch, and spoken through the
-          # PiperVoice native bridge whenever the cloud voice is down.
+          # PiperVoice native bridge for every announcement.
           curl -fSL --retry 3 -o piper-voice.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2"
           tar -xjf piper-voice.tar.bz2
           rm piper-voice.tar.bz2
@@ -716,9 +581,6 @@ jobs:
           gradle-version: 8.7
 
       - name: Build release APK (unsigned)
-        env:
-          EL_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          EL_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
         run: gradle :app:assembleRelease
 
       - name: Sign release APK with the Lynxos key
