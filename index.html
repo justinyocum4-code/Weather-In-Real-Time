@@ -14,6 +14,23 @@
   #weather-realtime-app { position: fixed; inset: 0; }
   #radar-map { position: absolute; inset: 0; background: #000; z-index: 1; }
   .leaflet-container { background: #000; font-family: inherit; }
+  /* YallBot-style high-tech glow on the radar tiles */
+  .leaflet-tile-pane .radar-frame {
+    filter: saturate(1.9) brightness(1.25) contrast(1.12) drop-shadow(0 0 10px rgba(0,229,255,.55));
+  }
+  /* Purple/navy high-tech tint over the map */
+  #radar-tint { position: absolute; inset: 0; z-index: 5; pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(40,0,80,.12) 0%, rgba(20,0,50,.38) 100%); }
+  /* Glowing alert polygons */
+  .leaflet-overlay-pane path.alert-glow {
+    filter: drop-shadow(0 0 6px rgba(255,80,80,.9)) drop-shadow(0 0 14px rgba(255,0,0,.5));
+  }
+  /* Top threat banner — like YallBot's stream title */
+  #threat-banner { position: absolute; top: 58px; left: 12px; right: 12px; z-index: 10;
+    background: linear-gradient(90deg, rgba(120,0,0,.92), rgba(200,20,20,.92), rgba(120,0,0,.92));
+    color: #fff; border-radius: 10px; padding: 10px 14px; font-weight: bold;
+    font-size: 17px; display: none; text-shadow: 0 0 8px rgba(255,255,255,.6);
+    border: 1px solid rgba(255,120,120,.7); }
   /* Top status bar */
   #top-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 10;
     background: rgba(0,0,0,.82); border-bottom: 2px solid var(--gold);
@@ -23,7 +40,7 @@
     padding: 4px 14px; font-size: 16px; }
   #clock { color: #ccc; font-size: 14px; }
   /* Live announcement bar (what the voice is saying) */
-  #announce-bar { position: absolute; top: 58px; left: 12px; right: 12px; z-index: 10;
+  #announce-bar { position: absolute; top: 112px; left: 12px; right: 12px; z-index: 10;
     background: rgba(201,162,39,.95); color: #111; border-radius: 10px;
     padding: 10px 14px; font-weight: bold; font-size: 16px; display: none; }
   /* Bottom controls */
@@ -69,6 +86,7 @@
 <body>
 <div id="weather-realtime-app">
   <div id="radar-map" aria-hidden="true"></div>
+  <div id="radar-tint" aria-hidden="true"></div>
 
   <div id="top-bar">
     <h1>WEATHER IN REAL TIME</h1>
@@ -76,6 +94,7 @@
     <span id="alert-count" role="status">0 alerts</span>
   </div>
 
+  <div id="threat-banner" role="status" aria-live="polite"></div>
   <div id="announce-bar" role="status" aria-live="polite"></div>
 
   <div id="controls" role="toolbar" aria-label="Weather controls">
@@ -133,8 +152,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.9.0";
-const WRT_VERSION_CODE = 14;
+const WRT_VERSION = "2.0.0";
+const WRT_VERSION_CODE = 15;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -349,10 +368,33 @@ function initMap() {
   else map.setView([39.8, -98.5], 4);
   document.getElementById("radar-map").setAttribute("tabindex", "-1");
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 12 }).addTo(map);
+  alertPolyLayer = L.layerGroup().addTo(map);
   loadRadar();
   loadStormCells();
   setInterval(loadRadar, 5 * 60 * 1000);
   setInterval(loadStormCells, 2 * 60 * 1000);
+}
+
+/* Glowing threat polygons for active alerts — the YallBot high-tech overlay. */
+let alertPolyLayer = null;
+function drawAlertPolygons(features) {
+  if (!map || !alertPolyLayer) return;
+  try {
+    alertPolyLayer.clearLayers();
+    // Draw the top 30 most severe to keep it fast.
+    const feats = [...features].sort((a, b) =>
+      scoreAlert(b.properties || {}) - scoreAlert(a.properties || {})).slice(0, 30);
+    for (const f of feats) {
+      const p = f.properties || {};
+      const geom = f.geometry;
+      if (!geom) continue;
+      const color = severityColor(p);
+      const layer = L.geoJSON(f, {
+        style: { color: color, weight: 3, opacity: 0.95, fillColor: color, fillOpacity: 0.18, className: "alert-glow" }
+      });
+      alertPolyLayer.addLayer(layer);
+    }
+  } catch (e) {}
 }
 
 /* Storm cells: NEXRAD-detected rotation, hail, and tornado signatures.
@@ -421,7 +463,7 @@ async function loadRadar() {
     const frames = past.slice(-8);
     for (const f of frames) {
       const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/2/1_1.png";
-      radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10 }));
+      radarLayers.push(L.tileLayer(url, { opacity: 0.65, zIndex: 10, className: "radar-frame" }));
     }
     if (!radarLayers.length) return;
     radarFrameIndex = 0;
@@ -465,6 +507,16 @@ function followTopAlert() {
     if (id && id === viewedAlertId) return;
     viewedAlertId = id;
     const c = alertCentroid(top);
+    // Threat banner — like YallBot's stream title.
+    try {
+      const tp = top.properties || {};
+      const banner = document.getElementById("threat-banner");
+      if (banner) {
+        const area = formatArea(tp);
+        banner.textContent = "🔴 LIVE: " + (tp.event || "Weather alert").toUpperCase() + (area ? " — " + area : "");
+        banner.style.display = "block";
+      }
+    } catch (e) {}
     if (!c) return;
     try {
       map.flyTo([c.lat, c.lon], 8, { duration: 2.0 });
@@ -558,6 +610,7 @@ function severityColor(p) {
 }
 
 /* Conversational openers — varied so it doesn't sound like a robot reading a list. */
+/* YallBot-style personality: sassy, quick-witted, knowledgeable. Never robotic. */
 const CONVO_OPENERS = [
   "Heads up,",
   "Quick update,",
@@ -565,12 +618,31 @@ const CONVO_OPENERS = [
   "Keeping an eye on this one,",
   "Wanted you to know,",
   "Still watching this,",
+  "Alright y'all,",
+  "Okay, listen,",
+  "Folks,",
+  "Breaking in,",
 ];
 let openerIndex = 0;
 function nextOpener() {
   const o = CONVO_OPENERS[openerIndex % CONVO_OPENERS.length];
   openerIndex++;
   return o;
+}
+
+/* Sassy asides — the YallBot flavor. Dropped in sparingly. */
+const SASSY_ASIDES = [
+  "Mother Nature's in a mood today.",
+  "The sky's acting up again.",
+  "Yeah, it's one of those days.",
+  "Stay sharp out there.",
+  "Not gonna lie, this one's got my attention.",
+];
+let asideIndex = 0;
+function nextAside() {
+  const a = SASSY_ASIDES[asideIndex % SASSY_ASIDES.length];
+  asideIndex++;
+  return a;
 }
 
 function articleFor(word) {
@@ -659,6 +731,8 @@ function buildAnnouncement(p) {
   } else if (/flash flood/i.test(event)) {
     text += "And remember, turn around don't drown, never try driving through flooded roads. ";
   }
+  // Occasional sassy aside — YallBot flavor, not every time.
+  if (Math.random() < 0.25) text += nextAside() + " ";
   if (text.length > 450) text = text.slice(0, 450) + ".";
   return text;
 }
@@ -753,6 +827,7 @@ async function pollAlerts() {
     currentFeatures = features;
     processAlerts(features);
     followTopAlert();
+    drawAlertPolygons(features);
     document.getElementById("alert-count").textContent = features.length + (features.length === 1 ? " alert" : " alerts");
   } catch (e) {
     document.getElementById("alert-count").textContent = "feed offline";
@@ -782,6 +857,95 @@ async function pollStormReports() {
       }
     }
   } catch (e) {}
+}
+
+/* ============ SPC convective outlooks (YallBot-style daily forecasts) ============
+   Parses the plain-text SPC outlook — the headline and summary are already
+   written in speakable language. */
+let lastSpcDay1 = "";
+let lastSpcDay2 = "";
+
+function parseSpcHeadline(text) {
+  // Headline looks like: ...THERE IS A SLIGHT RISK OF SEVERE THUNDERSTORMS
+  // ACROSS PARTS OF OKLAHOMA... (may span lines)
+  const flat = text.replace(/\r/g, "").replace(/\n(?!\n)/g, " ");
+  const m = flat.match(/\.\.\.THERE IS (A|AN) (.+?) RISK OF (.+?)\.\.\./i);
+  if (!m) return null;
+  const level = m[2].toLowerCase();
+  const area = m[3].toLowerCase().replace(/\s+/g, " ").trim();
+  return { level, area };
+}
+
+function parseSpcSummary(text) {
+  const m = text.replace(/\r/g, "").match(/\.\.\.SUMMARY\.\.\.\n([\s\S]*?)\n\.\.\./);
+  if (!m) return null;
+  return m[1].replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const SPC_LEVEL_WORDS = {
+  "general thunderstorm": "general thunderstorm",
+  "marginal": "a marginal",
+  "slight": "a slight",
+  "enhanced": "an enhanced",
+  "moderate": "a moderate",
+  "high": "a high",
+};
+
+async function pollSpcOutlook() {
+  for (const day of [1, 2]) {
+    try {
+      const r = await fetch("https://www.spc.noaa.gov/products/outlook/day" + day + "otlk.txt");
+      if (!r.ok) continue;
+      const text = await r.text();
+      const headline = parseSpcHeadline(text);
+      if (!headline) continue;
+      const summary = parseSpcSummary(text);
+      const key = day + "|" + headline.level + "|" + headline.area;
+      const lastKey = day === 1 ? lastSpcDay1 : lastSpcDay2;
+      if (key === lastKey) continue;
+      if (day === 1) lastSpcDay1 = key; else lastSpcDay2 = key;
+      const levelWord = SPC_LEVEL_WORDS[headline.level] || ("a " + headline.level);
+      const dayWord = day === 1 ? "today" : "tomorrow";
+      let speech = nextOpener() + " the Storm Prediction Center just updated the outlook for " + dayWord + ". " +
+        "There's " + levelWord + " risk of " + headline.area + ". ";
+      if (summary) {
+        let s = summary;
+        if (s.length > 300) s = s.slice(0, 300) + ".";
+        speech += s + " ";
+      }
+      speech += nextAside();
+      queueSpeech(speech, 65);
+    } catch (e) {}
+  }
+}
+
+/* ============ National Weather Intensity Score (WIS-style, 0-500+) ============ */
+let lastWis = -1;
+function computeWIS() {
+  let s = 0;
+  for (const f of currentFeatures) s += scoreAlert(f.properties || {});
+  s += currentLsrs.length * 5;
+  try {
+    for (const l of stormCellLayer ? [stormCellLayer] : []) {}
+  } catch (e) {}
+  return Math.min(999, Math.round(s));
+}
+
+function wisFlavor(score) {
+  if (score < 50) return "Pretty quiet across the country right now.";
+  if (score < 150) return "Things are active out there.";
+  if (score < 300) return "It's heating up nationwide.";
+  return "It's popping off out there, stay weather-aware.";
+}
+
+function wisUpdate() {
+  const score = computeWIS();
+  // Only announce on big swings, or every few hours.
+  const now = Date.now();
+  if (lastWis >= 0 && Math.abs(score - lastWis) < 75 && now - (wisUpdate._t || 0) < 4 * 3600000) return;
+  wisUpdate._t = now;
+  lastWis = score;
+  queueSpeech(nextOpener() + " national weather intensity score is " + score + ". " + wisFlavor(score), 55);
 }
 
 /* Storm reports with personality — like a friend telling you what just came in,
@@ -1057,10 +1221,12 @@ if (store.get("welcomed", "") !== "1") {
   document.getElementById("welcome").hidden = false;
   setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
 } else {
-  pollAlerts().then(() => announceStartup());
+  pollAlerts().then(() => { announceStartup(); pollSpcOutlook(); wisUpdate(); });
 }
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
+setInterval(pollSpcOutlook, 30 * 60 * 1000); // SPC outlooks update a few times daily
+setInterval(wisUpdate, 30 * 60 * 1000); // national intensity score readout
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) pollAlerts();
 });
