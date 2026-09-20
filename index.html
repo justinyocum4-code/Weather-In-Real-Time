@@ -828,8 +828,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.4.0";
-const WRT_VERSION_CODE = 30;
+const WRT_VERSION = "2.5.0";
+const WRT_VERSION_CODE = 31;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -917,10 +917,10 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
-/* The voice, forever: Piper, the on-device AI voice. Unlimited,
+/* The voice, forever: Kokoro, the on-device AI voice. Unlimited,
    offline, no key, no quota — it simply speaks. It reports completion
    with the id its native speak() returned. The built-in device voice is
-   an emergency backup if Piper isn't warmed up yet. */
+   an emergency backup if Kokoro isn't warmed up yet. */
 let utteranceSeq = 0;
 const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
@@ -931,8 +931,8 @@ function ttsSpeak(text) {
   bar.style.display = "block";
   const id = "s" + (++utteranceSeq);
   try {
-    if (typeof PiperVoice !== "undefined" && PiperVoice.speak) {
-      const pid = PiperVoice.speak(text);
+    if (typeof KokoroVoice !== "undefined" && KokoroVoice.speak) {
+      const pid = KokoroVoice.speak(text);
       if (pid) { pvIdMap[pid] = id; return id; }
     }
   } catch (e) {}
@@ -963,7 +963,7 @@ function ttsSpeak(text) {
 
 
 function ttsStop() {
-  try { if (typeof PiperVoice !== "undefined" && PiperVoice.stop) PiperVoice.stop(); } catch (e) {}
+  try { if (typeof KokoroVoice !== "undefined" && KokoroVoice.stop) KokoroVoice.stop(); } catch (e) {}
   try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
   try { if ("speechSynthesis" in window) speechSynthesis.cancel(); } catch (e) {}
 }
@@ -1015,8 +1015,8 @@ const presenter = {
       const id = ttsSpeak(item.text);
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
-      // finished-callback never arrives. Piper synthesizes on-device in
-      // about a second, so this timer only needs to cover playback.
+      // finished-callback never arrives. Kokoro synthesizes on-device in
+      // a few seconds, so this timer only needs to cover playback.
       const ms = Math.min(120000, Math.max(10000, item.text.length * 85));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
