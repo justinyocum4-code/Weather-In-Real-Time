@@ -133,8 +133,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "1.1.1";
-const WRT_VERSION_CODE = 4;
+const WRT_VERSION = "1.1.2";
+const WRT_VERSION_CODE = 5;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -481,7 +481,7 @@ let currentFeatures = [];
 
 async function pollAlerts() {
   try {
-    const r = await fetch("https://api.weather.gov/alerts/active?status=actual&limit=500");
+    const r = await fetch("https://api.weather.gov/alerts/active?status=actual");
     if (!r.ok) throw new Error("bad status");
     const data = await r.json();
     const features = data.features || [];
