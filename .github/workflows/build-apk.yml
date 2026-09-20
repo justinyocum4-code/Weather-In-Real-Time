@@ -93,6 +93,9 @@ jobs:
           android {
               namespace 'com.weatherrealtime.app'
               compileSdk 34
+              buildFeatures {
+                  buildConfig = true
+              }
               defaultConfig {
                   applicationId 'com.weatherrealtime.app'
                   minSdk 24
