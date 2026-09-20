@@ -731,18 +731,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .alert-item small { display: block; color: #ccc; font-weight: normal; font-size: 14px; margin-top: 4px; }
   .sev-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
   /* Welcome overlay */
-  #welcome { position: absolute; inset: 0; z-index: 50; background: rgba(0,0,0,.94);
-    display: flex; align-items: center; justify-content: center; padding: 24px; }
-  #welcome[hidden] { display: none !important; }
-  #welcome .card { max-width: 560px; background: #0a0a0a; border: 3px solid var(--gold);
-    border-radius: 16px; padding: 28px; }
-  #welcome h2 { color: var(--gold); margin-top: 0; }
-  #welcome p { line-height: 1.5; }
-  #welcome button { display: block; width: 100%; margin: 10px 0; padding: 16px;
-    font-size: 18px; font-weight: bold; border-radius: 12px; border: 2px solid var(--gold);
-    background: var(--gold); color: #111; }
-  #welcome button.secondary { background: var(--black); color: var(--gold); }
-  #welcome button:focus { outline: 3px solid #fff; }
   .setting-row { display: flex; align-items: center; justify-content: space-between;
     gap: 12px; padding: 12px 4px; border-bottom: 1px solid #333; font-size: 17px; }
   .setting-row button.toggle { min-width: 90px; padding: 10px; border-radius: 10px;
@@ -804,27 +792,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </div>
     <div class="setting-row">
       <span>Voice</span>
-      <span style="font-size:14px;color:#7fd67f;">Device voice — always on, works offline</span>
+      <select id="voice-select" aria-label="Choose voice" style="max-width:60%;font-size:15px;padding:10px;border-radius:10px;border:2px solid var(--gold);background:#0a0a0a;color:var(--gold);font-weight:bold;"></select>
     </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
-  </div>
-
-  <div id="welcome" hidden>
-    <div class="card">
-      <h2>Weather In Real Time</h2>
-      <p>A full-screen live radar watching the entire United States. When a warning or storm report comes in, the radar moves to it and a voice tells you what is happening and where.</p>
-      <p>To prioritize warnings near you, allow location access.</p>
-      <button type="button" id="btn-enable-loc">Enable location</button>
-      <button type="button" id="btn-skip-loc" class="secondary">Skip for now</button>
-    </div>
   </div>
 </div>
 
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.9.0";
-const WRT_VERSION_CODE = 44;
+const WRT_VERSION = "3.0.0";
+const WRT_VERSION_CODE = 45;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1066,8 +1044,6 @@ function requestLocation(done) {
           } catch (e) {}
         })
         .catch(() => {});
-      document.getElementById("welcome").hidden = true;
-      store.set("welcomed", "1");
       if (done) done(true);
     },
     () => { if (done) done(false); },
@@ -2804,22 +2780,54 @@ document.getElementById("btn-relocate").addEventListener("click", () => {
   });
 });
 
+/* Voice picker: lists the device's English TTS voices so you can choose the
+   one you like best. The choice is saved on the device and used from then on. */
+function prettyVoiceName(v) {
+  let n = String(v.name || "Voice");
+  n = n.replace(/en[-_]?us[-_]?/gi, "").replace(/language/gi, "").replace(/[-_]+/g, " ").trim();
+  if (!n) n = "English voice";
+  n = n.charAt(0).toUpperCase() + n.slice(1);
+  if (v.network) n += " (online)";
+  return n;
+}
+function loadVoiceList() {
+  const sel = document.getElementById("voice-select");
+  if (!sel) return;
+  try {
+    if (typeof LynxosTts === "undefined" || !LynxosTts.getVoices) {
+      sel.innerHTML = "<option>Device default</option>";
+      return;
+    }
+    let voices = [];
+    try { voices = JSON.parse(LynxosTts.getVoices() || "[]"); } catch (e) {}
+    if (!voices.length) {
+      // The voice list can load a moment after TTS init — try once more.
+      setTimeout(loadVoiceList, 2500);
+      sel.innerHTML = "<option>Loading voices…</option>";
+      return;
+    }
+    const saved = store.get("tts_voice", "");
+    sel.innerHTML = "";
+    voices.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v.name;
+      o.textContent = prettyVoiceName(v);
+      if (v.name === saved) o.selected = true;
+      sel.appendChild(o);
+    });
+  } catch (e) {}
+}
+document.getElementById("voice-select").addEventListener("change", (e) => {
+  const name = e.target.value;
+  try {
+    store.set("tts_voice", name);
+    if (typeof LynxosTts !== "undefined" && LynxosTts.setVoiceName) LynxosTts.setVoiceName(name);
+  } catch (err) {}
+  queueSpeech("This is how I sound now.", 999);
+});
+
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("Voice check.", 999);
-});
-
-
-
-document.getElementById("btn-enable-loc").addEventListener("click", () => {
-  requestLocation((ok) => {
-    queueSpeech(ok ? "Location set." : "Location unavailable.", 999);
-    pollAlerts().then(() => announceStartup());
-  });
-});
-document.getElementById("btn-skip-loc").addEventListener("click", () => {
-  document.getElementById("welcome").hidden = true;
-  store.set("welcomed", "1");
-  pollAlerts().then(() => announceStartup());
 });
 
 /* Clock */
@@ -2840,10 +2848,20 @@ updateLocStatus();
 tickClock();
 setInterval(tickClock, 30000);
 initMap();
-if (store.get("welcomed", "") !== "1") {
-  document.getElementById("welcome").hidden = false;
-  setTimeout(() => document.getElementById("btn-enable-loc").focus(), 500);
-} else {
+loadVoiceList();
+// No in-app location dialog anymore (v3.0): on a fresh install with no saved
+// location, make one silent geolocation request so the native Android
+// permission prompt appears on its own. If it fails, stay quiet — location
+// can be set any time from Settings.
+if (!store.get("lat", "") || !store.get("lon", "")) {
+  setTimeout(() => {
+    try {
+      requestLocation((ok) => {
+        if (ok) queueSpeech("Location set.", 60);
+      });
+    } catch (e) {}
+  }, 3000);
+}
   // If anything went wrong last run, say so out loud (one short line) before
   // the normal startup — native crashes come from getLastCrash(), script
   // errors from the last_js_error key.
@@ -2882,7 +2900,6 @@ if (store.get("welcomed", "") !== "1") {
     shuffleArr(segments);
     for (const text of segments) queueSpeech(text, 800);
   });
-}
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
 setInterval(fetchQuakes, 5 * 60 * 1000); // USGS significant earthquakes
