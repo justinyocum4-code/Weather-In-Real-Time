@@ -152,8 +152,8 @@
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "2.0.3";
-const WRT_VERSION_CODE = 19;
+const WRT_VERSION = "2.0.4";
+const WRT_VERSION_CODE = 20;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -489,9 +489,7 @@ async function loadStormCells() {
         const id = "tvs-" + (p.storm_id || "") + "-" + (p.valid || "");
         if (!seenTvsIds.has(id)) {
           seenTvsIds.add(id);
-          queueSpeech("Heads up, radar is showing a possible tornado signature. " +
-            "This is rotation the radar is detecting right now, not a confirmed tornado. " +
-            "Stay weather aware.", 90);
+          queueSpeech(nextTvsLine(), 90);
           map.flyTo([lat, lon], 8, { duration: 2.5 });
         }
       } else if (meso) {
@@ -667,9 +665,33 @@ function severityColor(p) {
   return "#888888";
 }
 
-/* Conversational openers — varied so it doesn't sound like a robot reading a list. */
-/* YallBot-style personality: sassy, quick-witted, knowledgeable. Never robotic. */
-const CONVO_OPENERS = [
+/* Deal lines from a shuffled deck — never the same line twice until the whole
+   deck has been used, then reshuffle. This is what makes the voice feel like
+   a person instead of a robot reading a list. */
+function cycler(lines) {
+  let deck = [];
+  return function () {
+    if (!deck.length) {
+      deck = lines.slice();
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const t = deck[i]; deck[i] = deck[j]; deck[j] = t;
+      }
+    }
+    return deck.pop();
+  };
+}
+
+/* YallBot-style personality: sassy, quick-witted, knowledgeable. Never robotic.
+   The warning FACTS stay serious; the character lives in the openers, hooks,
+   asides, check-ins, and calm-weather chatter around them. */
+const nextTvsLine = cycler([
+  "Heads up, radar is showing a possible tornado signature. This is rotation the radar is detecting right now, not a confirmed tornado. Stay weather aware.",
+  "Whoa — the radar just flagged a possible tornado signature. Rotation detected, not confirmed. Keep your eyes up.",
+  "Radar's picking up rotation that could be a tornado signature. Not confirmed, but I'm watching it close.",
+  "Possible tornado signature on the radar, folks. It's rotation the radar sees — not a confirmed tornado. Stay alert.",
+]);
+const nextOpener = cycler([
   "Heads up,",
   "Quick update,",
   "Just in,",
@@ -680,28 +702,44 @@ const CONVO_OPENERS = [
   "Okay, listen,",
   "Folks,",
   "Breaking in,",
-];
-let openerIndex = 0;
-function nextOpener() {
-  const o = CONVO_OPENERS[openerIndex % CONVO_OPENERS.length];
-  openerIndex++;
-  return o;
-}
+  "Well, would you look at that,",
+  "New development,",
+  "Here we go again,",
+  "Mother Nature's at it again,",
+  "Spicy one coming in,",
+  "Plot twist,",
+  "Buckle up,",
+  "The atmosphere's cooking up something,",
+  "Radar's got something to say,",
+  "Fresh off the wire,",
+  "Heads on a swivel,",
+  "Story's developing,",
+  "Oh boy, here comes another one,",
+  "Weather desk update,",
+]);
 
-/* Sassy asides — the YallBot flavor. Dropped in sparingly. */
-const SASSY_ASIDES = [
+/* Sassy asides — the YallBot flavor. Dropped in sparingly, kept light so the
+   warning itself stays serious. */
+const nextAside = cycler([
   "Mother Nature's in a mood today.",
   "The sky's acting up again.",
   "Yeah, it's one of those days.",
   "Stay sharp out there.",
   "Not gonna lie, this one's got my attention.",
-];
-let asideIndex = 0;
-function nextAside() {
-  const a = SASSY_ASIDES[asideIndex % SASSY_ASIDES.length];
-  asideIndex++;
-  return a;
-}
+  "The atmosphere woke up and chose violence.",
+  "Classic. Just classic.",
+  "Nimbus is already hiding under the desk.",
+  "I did NOT order this weather.",
+  "Somebody up there is bored.",
+  "The clouds are throwing hands today.",
+  "Okay, atmosphere, we get it, you're dramatic.",
+  "This is why we can't have nice patio furniture.",
+  "The sky said, watch this.",
+  "Rude. Absolutely rude weather.",
+  "I'd cancel my outdoor plans if I were you. Just saying.",
+  "Mother Nature skipped her coffee this morning.",
+  "Drama. Pure atmospheric drama.",
+]);
 
 function articleFor(word) {
   return /^[aeiou]/i.test(word) ? "an" : "a";
@@ -755,29 +793,27 @@ function formatArea(p) {
 }
 
 /* Safety reminders with variety — never the same line twice in a row. */
-const TORNADO_SAFETY = [
+/* Safety reminders with real variety — never the same line twice in a row. */
+const nextTornadoSafety = cycler([
   "If you're anywhere near there, get to the lowest floor and away from windows.",
   "Time to take shelter, folks. Lowest floor, away from windows.",
   "Get somewhere safe now. Interior room, lowest floor, no windows.",
-];
-const FLOOD_SAFETY = [
+  "Don't wait on this one. Get underground or to an interior room, now.",
+  "Shelter time. Lowest floor, center of the building, cover your head.",
+  "If you're in the path, stop what you're doing and take cover.",
+  "Bathroom, closet, basement — pick the most interior spot and get there.",
+  "This is the real deal. Take shelter immediately, away from windows.",
+]);
+const nextFloodSafety = cycler([
   "And remember, turn around don't drown, never try driving through flooded roads.",
   "Seriously, don't drive through flood water. It takes less than you think to sweep a car away.",
   "Flood water's no joke. If the road's under water, find another way around.",
   "Just a reminder, six inches of moving water can knock you down. Stay out of it.",
-];
-let tornadoSafetyIdx = 0;
-let floodSafetyIdx = 0;
-function nextTornadoSafety() {
-  const s = TORNADO_SAFETY[tornadoSafetyIdx % TORNADO_SAFETY.length];
-  tornadoSafetyIdx++;
-  return s;
-}
-function nextFloodSafety() {
-  const s = FLOOD_SAFETY[floodSafetyIdx % FLOOD_SAFETY.length];
-  floodSafetyIdx++;
-  return s;
-}
+  "Your car is not a boat. Turn around, don't drown.",
+  "Water over the road? Nope. Find another route.",
+  "It doesn't look deep until your car starts floating. Don't risk it.",
+  "Flooded roads catch more people off guard than you'd think. Turn around.",
+]);
 /* Story-style transitions to keep it flowing like someone telling you what's happening. */
 const STORY_BITS = [
   "Here's what's going on.",
@@ -792,30 +828,36 @@ let storyIndex = 0;
    path -> safety action. Personality (sass, Nimbus, asides) lives ONLY in
    calm-weather chatter — never inside a warning. */
 
-/* "until 9:45 AM Eastern" from the expires timestamp. Zone from the UTC offset. */
+/* "until 9:45 AM Eastern" from the expires timestamp. The time is computed from
+   the timestamp's OWN UTC offset — never the device timezone — so an Eastern
+   alert still says Eastern time on a Central-time phone. */
 function expiresSpoken(p) {
   try {
     const e = p.expires || p.ends;
     if (!e) return null;
-    const d = new Date(e);
-    let h = d.getHours(), m = d.getMinutes();
-    const ap = h >= 12 ? "PM" : "AM";
-    h = h % 12 || 12;
-    let tz = "";
+    const t = Date.parse(e);
+    if (isNaN(t)) return null;
+    let h, m, mo, tz = "";
     const om = String(e).match(/([+-])(\d{2}):?(\d{2})\s*$/);
     if (om) {
       const off = (om[1] === "-" ? -1 : 1) * (parseInt(om[2], 10) + parseInt(om[3], 10) / 60);
+      const local = new Date(t + off * 3600000);
+      h = local.getUTCHours(); m = local.getUTCMinutes(); mo = local.getUTCMonth();
       // US daylight time runs roughly March–November; normalize to standard offset.
-      const mo = d.getMonth();
       const dst = mo >= 2 && mo <= 10;
-      const base = dst ? off + 1 : off;
+      const base = dst ? off - 1 : off;
       if (base === -5) tz = " Eastern";
       else if (base === -6) tz = " Central";
       else if (base === -7) tz = " Mountain";
       else if (base === -8) tz = " Pacific";
       else if (base === -9) tz = " Alaska";
       else if (base === -10) tz = " Hawaii";
+    } else {
+      const d = new Date(t);
+      h = d.getHours(); m = d.getMinutes(); // no offset info — device zone, no label
     }
+    const ap = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
     return "until " + h + (m ? ":" + String(m).padStart(2, "0") : "") + " " + ap + tz;
   } catch (err) { return null; }
 }
@@ -852,30 +894,48 @@ function extractRainRate(desc) {
 }
 
 /* Impact hooks for severe thunderstorm warnings — YallBot leads with the punch. */
+const _svrHookDeal = cycler([
+  "Roofs, siding, and trees are about to take a beating across {A}.",
+  "Heads up, {A} — this line has some real punch to it.",
+  "Y'all, this is a nasty line working through {A}.",
+  "Folks in {A}, this storm means business.",
+  "This line rolling through {A} is not messing around.",
+  "{A}, you've got a mean one heading your way.",
+  "That line over {A}? Yeah, it's got teeth.",
+  "Storm's loading up over {A}, and it looks angry.",
+  "{A} — batten down the hatches, this one's rowdy.",
+  "Big ugly line of storms chewing through {A} right now.",
+]);
 function svrHook(area) {
-  const v = [
-    "Roofs, siding, and trees are about to take a beating across " + area + ".",
-    "Heads up, " + area + " — this line has some real punch to it.",
-    "Y'all, this is a nasty line working through " + area + ".",
-    "Folks in " + area + ", this storm means business.",
-  ];
-  return v[Math.floor(Math.random() * v.length)];
+  return _svrHookDeal().split("{A}").join(area || "the warned area");
 }
 
 /* Calm-weather personality — Nimbus, theatrical asides, snack jokes.
-   NEVER used inside warnings. */
-function calmAside() {
-  const v = [
-    "Nimbus is sniffing the upstream data. Says it's quiet out there. Good dog.",
-    "We're tracking this live, folks. Keep an eye up.",
-    "GASPS DRAMATICALLY! Just kidding — it's calm. Had to keep you on your toes.",
-    "hah, chuckles. Quiet on the radar. I'll take it.",
-    "Nimbus wanted a snack, but all I had was upstream data. He ate it anyway.",
-    "Slow weather day. The radar's just vibing.",
-    "I'm watching the whole country for you, y'all. Not a thing popping off right now.",
-  ];
-  return v[Math.floor(Math.random() * v.length)];
-}
+   NEVER used inside warnings. Full sarcasm allowed here. */
+const calmAside = cycler([
+  "Nimbus is sniffing the upstream data. Says it's quiet out there. Good dog.",
+  "We're tracking this live, folks. Keep an eye up.",
+  "GASPS DRAMATICALLY! Just kidding — it's calm. Had to keep you on your toes.",
+  "Quiet on the radar. I'll take it.",
+  "Nimbus wanted a snack, but all I had was upstream data. He ate it anyway.",
+  "Slow weather day. The radar's just vibing.",
+  "I'm watching the whole country for you, y'all. Not a thing popping off right now.",
+  "Radar's so quiet I can hear Nimbus snoring.",
+  "All clear. Even the clouds are behaving. Suspicious, honestly.",
+  "Nothing but calm skies on the radar. Kidding aside — it's genuinely quiet.",
+  "The atmosphere's taking a nap. Let's not wake it.",
+  "Nimbus gives the radar two paws up. Quiet day.",
+  "I've stared at this radar so long I'm starting to see shapes. Still no storms though.",
+  "Calmest radar I've seen all week. Nimbus is disappointed — he loves the drama.",
+  "No warnings, no watches, no drama. The weather's on its best behavior.",
+  "It's so quiet out there, I'm narrating my own thoughts. This is fine.",
+  "Radar check: whole lotta nothing. Beautiful.",
+  "The sky's being suspiciously polite today.",
+  "Nimbus just yawned. That tells you everything about the radar right now.",
+  "Zero alerts nationwide. I'm as shocked as you are.",
+  "Peaceful skies. Don't worry, I'll find something to talk about.",
+  "Weather's calm, radar's clean, Nimbus is napping. Living the dream.",
+]);
 
 function buildAnnouncement(p) {
   const event = p.event || "Weather alert";
@@ -896,7 +956,7 @@ function buildAnnouncement(p) {
     else text += " in the warned area";
     text += ".";
     if (towns) text += " In the path: " + towns + ".";
-    text += " Take cover now, away from windows.";
+    text += " " + nextTornadoSafety();
     if (/mobile/i.test(desc) || Math.random() < 0.4) {
       text += " Mobile homes aren't safe — get to sturdier shelter immediately.";
     }
@@ -1012,7 +1072,7 @@ function chatterUpdate() {
       if (Math.random() < 0.45) {
         queueSpeech(calmAside(), 60);
       } else {
-        queueSpeech("All quiet out there, y'all. No active weather alerts in the country right now. I'm still watching — I'll holler the moment something pops up.", 60);
+        queueSpeech(nextAllClear(), 60);
       }
     }
     return;
@@ -1024,10 +1084,32 @@ function chatterUpdate() {
     chatterIndex++;
     const p = f.properties || {};
     const c = alertCentroid(f);
-    const checkin = Math.random() < 0.35 ? "Checking back in. " : "";
+    const checkin = Math.random() < 0.5 ? nextCheckin() + " " : "";
     queueSpeech(checkin + buildAnnouncement(p), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
   }
 }
+const nextAllClear = cycler([
+  "All quiet out there, y'all. No active weather alerts in the country right now. I'm still watching — I'll holler the moment something pops up.",
+  "Radar's clean, skies are calm. Not a single alert in the whole country. Enjoy it while it lasts.",
+  "Nothing to report, folks. The entire country's behaving itself. I'll let you know the second that changes.",
+  "All clear nationwide. Even Nimbus is bored. I'm still on watch, don't worry.",
+  "Zero active alerts. The weather's taking the day off, and honestly? Good for it.",
+  "Quiet across the board. No warnings, no watches. Just me, the radar, and Nimbus.",
+  "The country's calm. Almost too calm. I'm watching anyway.",
+  "All clear. I'll be here staring at the radar so you don't have to.",
+]);
+const nextCheckin = cycler([
+  "Checking back in.",
+  "Still on this one.",
+  "Quick check-in.",
+  "Update on this.",
+  "Still watching.",
+  "Keeping tabs on this one.",
+  "Back to this storm.",
+  "Situation update.",
+  "Still tracking this.",
+  "Circling back to this one.",
+]);
 function chatterMode() { return store.get("chatter", "chatty"); }
 
 /* ============ Alerts polling ============ */
@@ -1148,11 +1230,31 @@ function computeWIS() {
   return Math.min(999, Math.round(s));
 }
 
+const _wisQuiet = cycler([
+  "Pretty quiet across the country right now.",
+  "Calm nationwide. Nimbus approves.",
+  "Barely a blip on the national radar.",
+]);
+const _wisActive = cycler([
+  "Things are active out there.",
+  "There's some weather making noise around the country.",
+  "A few things popping on the national map.",
+]);
+const _wisHeating = cycler([
+  "It's heating up nationwide.",
+  "The country's getting rowdy, weather-wise.",
+  "Plenty of action on the national map right now.",
+]);
+const _wisPopping = cycler([
+  "It's popping off out there, stay weather-aware.",
+  "The whole country's lit up. Keep your eyes open.",
+  "Serious weather day nationwide. Stay sharp, y'all.",
+]);
 function wisFlavor(score) {
-  if (score < 50) return "Pretty quiet across the country right now.";
-  if (score < 150) return "Things are active out there.";
-  if (score < 300) return "It's heating up nationwide.";
-  return "It's popping off out there, stay weather-aware.";
+  if (score < 50) return _wisQuiet();
+  if (score < 150) return _wisActive();
+  if (score < 300) return _wisHeating();
+  return _wisPopping();
 }
 
 function wisUpdate() {
@@ -1167,19 +1269,20 @@ function wisUpdate() {
 
 /* Storm reports with personality — like a friend telling you what just came in,
    not a dispatcher reading a log. */
-const REPORT_VIBES = [
+const nextVibe = cycler([
   "Oh, we've got a report coming in.",
   "Okay, listen to this one.",
   "New report just landed.",
   "Wow, okay, check this out.",
-  " Somebody just called this in.",
-];
-let vibeIndex = 0;
-function nextVibe() {
-  const v = REPORT_VIBES[vibeIndex % REPORT_VIBES.length];
-  vibeIndex++;
-  return v;
-}
+  "Somebody just called this in.",
+  "Fresh report, hot off the radio.",
+  "The spotters are talking. Here's what they're saying.",
+  "Incoming. Somebody saw something.",
+  "This just came across the wire.",
+  "Eyes on the ground are reporting.",
+  "Oh, this is interesting.",
+  "We've got boots-on-the-ground intel.",
+]);
 
 /* A human reaction to the report — gives it character. */
 function reportReaction(type, mag) {
