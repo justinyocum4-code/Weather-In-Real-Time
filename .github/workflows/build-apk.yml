@@ -99,6 +99,10 @@ jobs:
                   targetSdk 34
                   versionCode __APP_VERSION_CODE__
                   versionName '__APP_VERSION_NAME__'
+                  def elKey = System.getenv("EL_API_KEY") ?: ""
+                  def elVoice = System.getenv("EL_VOICE_ID") ?: ""
+                  buildConfigField "String", "EL_API_KEY", '"' + elKey.replace('\\', '\\\\').replace('"', '\\"') + '"'
+                  buildConfigField "String", "EL_VOICE_ID", '"' + elVoice.replace('\\', '\\\\').replace('"', '\\"') + '"'
               }
           }
           EOF
@@ -226,7 +230,11 @@ jobs:
                               android.content.SharedPreferences p = getSharedPreferences("weather_realtime", MODE_PRIVATE);
                               String k = p.getString("el_key", "");
                               String v = p.getString("el_voice", "");
-                              return k != null && !k.isEmpty() && v != null && !v.isEmpty();
+                              if (k != null && !k.isEmpty() && v != null && !v.isEmpty()) return true;
+                          } catch (Exception e) {}
+                          try {
+                              return BuildConfig.EL_API_KEY != null && !BuildConfig.EL_API_KEY.isEmpty()
+                                  && BuildConfig.EL_VOICE_ID != null && !BuildConfig.EL_VOICE_ID.isEmpty();
                           } catch (Exception e) { return false; }
                       }
                       @JavascriptInterface
@@ -249,15 +257,19 @@ jobs:
                       }
                       @JavascriptInterface
                       public String speak(String text) {
-                          if (text == null || text.isEmpty()) return null;
-                          elGen++;
-                          stopElPlayer();
-                          try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
-                          final String id = "el" + (++ttsUtteranceSeq);
-                          final int gen = elGen;
-                          final String t = text;
-                          new Thread(new Runnable() { @Override public void run() { elevenLabsSpeak(id, t, gen); } }).start();
-                          return id;
+                          try {
+                              if (text == null || text.isEmpty()) return null;
+                              elGen++;
+                              stopElPlayer();
+                              try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
+                              final String id = "el" + (++ttsUtteranceSeq);
+                              final int gen = elGen;
+                              final String t = text;
+                              new Thread(new Runnable() { @Override public void run() {
+                                  try { elevenLabsSpeak(id, t, gen); } catch (Throwable th) { ttsDoneCallback(id); }
+                              } }).start();
+                              return id;
+                          } catch (Throwable t) { return null; }
                       }
                       @JavascriptInterface
                       public void stop() {
@@ -370,6 +382,8 @@ jobs:
                       android.content.SharedPreferences p = getSharedPreferences("weather_realtime", MODE_PRIVATE);
                       String key = p.getString("el_key", "");
                       String voiceId = p.getString("el_voice", "");
+                      if (key == null || key.isEmpty()) { try { key = BuildConfig.EL_API_KEY; } catch (Exception ignored) {} }
+                      if (voiceId == null || voiceId.isEmpty()) { try { voiceId = BuildConfig.EL_VOICE_ID; } catch (Exception ignored) {} }
                       if (key == null || key.isEmpty() || voiceId == null || voiceId.isEmpty()) throw new Exception("no creds");
                       if (gen != elGen) return;
                       // Monthly free-minute guard. Turbo costs 0.5 credits/char;
@@ -491,6 +505,9 @@ jobs:
           gradle-version: 8.7
 
       - name: Build release APK (unsigned)
+        env:
+          EL_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          EL_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
         run: gradle :app:assembleRelease
 
       - name: Sign release APK with the Lynxos key
