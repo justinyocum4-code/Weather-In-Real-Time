@@ -693,9 +693,25 @@ svg.leaflet-image-layer.leaflet-interactive path {
   /* Purple/navy high-tech tint over the map */
   #radar-tint { position: absolute; inset: 0; z-index: 5; pointer-events: none;
     background: radial-gradient(ellipse at center, rgba(40,0,80,.12) 0%, rgba(20,0,50,.38) 100%); }
-  /* Glowing alert polygons */
+  /* Glowing alert polygons — pulsing like YallBot's stream so the eye
+     goes straight to the danger. Opacity pulse is cheap on the GPU;
+     animating the drop-shadow filter itself would stutter. */
   .leaflet-overlay-pane path.alert-glow {
     filter: drop-shadow(0 0 6px rgba(255,80,80,.9)) drop-shadow(0 0 14px rgba(255,0,0,.5));
+    animation: alertPulse 2.6s ease-in-out infinite;
+  }
+  @keyframes alertPulse {
+    0%, 100% { opacity: 0.95; }
+    50% { opacity: 0.45; }
+  }
+  /* Storm report icons plotted right on the radar, YallBot-style. */
+  .lsr-icon { background: none; border: none; }
+  .lsr-icon span { font-size: 22px; line-height: 26px;
+    filter: drop-shadow(0 0 6px rgba(255,255,255,.85)) drop-shadow(0 0 12px rgba(255,200,40,.5)); }
+  .lsr-icon.tornado span { animation: lsrPulse 1.6s ease-in-out infinite; }
+  @keyframes lsrPulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.35); }
   }
   /* Top threat banner — like YallBot's stream title */
   #threat-banner { position: absolute; top: 58px; left: 12px; right: 12px; z-index: 10;
@@ -801,8 +817,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.0.0";
-const WRT_VERSION_CODE = 45;
+const WRT_VERSION = "3.1.0";
+const WRT_VERSION_CODE = 46;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1075,6 +1091,7 @@ function initMap() {
   alertPolyLayer = L.layerGroup().addTo(map);
   loadRadar();
   loadStormCells();
+  startIdleDrift();
   setInterval(loadRadar, 5 * 60 * 1000);
   setInterval(loadStormCells, 2 * 60 * 1000);
 }
@@ -1293,6 +1310,7 @@ let panResumeTimer = null;
 function smoothPan(lat, lon, zoom) {
   if (!map) return;
   try {
+    pauseDrift(2); // let the alert move finish before the drift resumes
     stopRadarAnim();
     if (panResumeTimer) { clearTimeout(panResumeTimer); panResumeTimer = null; }
     for (const l of radarLayers) { try { l.setOpacity(0.18); } catch (e) {} }
@@ -1324,6 +1342,43 @@ function panToAlert(p, immediate) {
   if (!immediate && now - lastPan < 8000) return;
   lastPan = now;
   smoothPan(c.lat, c.lon, 8);
+}
+
+/* Idle drift: when the radar has been quiet, the camera slowly wanders the
+   country like YallBot's stream — it never just sits still. Any real alert,
+   storm report, quake, or manual touch takes over instantly and pauses the
+   drift for a while. */
+let driftTimer = null, driftPausedUntil = 0, driftIndex = 0;
+const DRIFT_POINTS = [
+  [39.8, -98.5], [34.2, -101.5], [41.5, -93.0], [36.8, -96.5],
+  [33.5, -86.8], [38.2, -84.8], [42.2, -88.5], [35.5, -106.5],
+  [39.2, -105.0], [43.5, -110.5], [37.5, -95.0], [40.8, -99.0]
+];
+function pauseDrift(minutes) {
+  driftPausedUntil = Date.now() + minutes * 60 * 1000;
+}
+function startIdleDrift() {
+  if (driftTimer || !map) return;
+  try {
+    map.on("dragstart", () => pauseDrift(5));
+    map.on("zoomstart", () => pauseDrift(5));
+  } catch (e) {}
+  driftTimer = setInterval(() => {
+    try {
+      if (!map || Date.now() < driftPausedUntil) return;
+      if (document.hidden) return;
+      // Anything happening takes priority over the drift.
+      if (presenter.busy || presenter.queue.length) return;
+      if (currentFeatures.length || currentLsrs.length) return;
+      if ((quakeLayer && quakeLayer.getLayers().length) ||
+          (stormCellLayer && stormCellLayer.getLayers().length)) return;
+      driftIndex = (driftIndex + 1) % DRIFT_POINTS.length;
+      const p = DRIFT_POINTS[driftIndex];
+      // Gentle wander: a long slow pan at the national view. The radar loop
+      // keeps playing through it — no dimming, no stutter.
+      map.panTo(p, { animate: true, duration: 8, easeLinearity: 0.25 });
+    } catch (e) {}
+  }, 45000);
 }
 
 /* Tour: when the presenter runs dry, feed it the next most important alert.
@@ -2173,6 +2228,50 @@ async function pollAlerts() {
    emergency management, and the public. Updated as they're filed. */
 const seenLsrIds = new Set();
 let currentLsrs = [];
+let lsrLayer = null;
+
+/* Storm report icon by report type — plotted right on the radar so the
+   reports are visible, not just spoken. Tornado reports pulse. */
+function lsrIcon(type) {
+  const t = String(type || "").toLowerCase();
+  let emoji = "📍", cls = "lsr-icon";
+  if (t.indexOf("tornado") >= 0) { emoji = "🌪"; cls += " tornado"; }
+  else if (t.indexOf("hail") >= 0) emoji = "🧊";
+  else if (t.indexOf("wind") >= 0 || t.indexOf("gust") >= 0) emoji = "💨";
+  else if (t.indexOf("flood") >= 0 || t.indexOf("rain") >= 0) emoji = "🌧";
+  else if (t.indexOf("snow") >= 0 || t.indexOf("ice") >= 0 || t.indexOf("sleet") >= 0) emoji = "❄";
+  else if (t.indexOf("lightning") >= 0) emoji = "🌩";
+  else if (t.indexOf("fire") >= 0 || t.indexOf("smoke") >= 0) emoji = "🔥";
+  return L.divIcon({ className: cls, html: "<span>" + emoji + "</span>",
+    iconSize: [26, 26], iconAnchor: [13, 13] });
+}
+
+/* Rebuild the on-radar storm report markers: only the last 3 hours, capped
+   at 60 so a big outbreak day can't slow the map down. */
+function drawStormReportIcons(feats) {
+  if (!map) return;
+  try {
+    if (lsrLayer) { try { map.removeLayer(lsrLayer); } catch (e) {} }
+    lsrLayer = L.layerGroup().addTo(map);
+    const cutoff = Date.now() - 3 * 3600 * 1000;
+    let n = 0;
+    for (const f of feats) {
+      if (n >= 60) break;
+      const p = f.properties || {};
+      const coords = f.geometry && f.geometry.coordinates;
+      if (!coords || coords.length < 2) continue;
+      try {
+        const vt = new Date(p.valid).getTime();
+        if (isNaN(vt) || vt < cutoff) continue;
+      } catch (e) { continue; }
+      try {
+        L.marker([coords[1], coords[0]],
+          { icon: lsrIcon(p.type), interactive: false, keyboard: false }).addTo(lsrLayer);
+        n++;
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
 
 async function pollStormReports() {
   try {
@@ -2181,6 +2280,7 @@ async function pollStormReports() {
     const data = await r.json();
     const feats = data.features || [];
     currentLsrs = feats;
+    drawStormReportIcons(feats);
     for (const f of feats) {
       const p = f.properties || {};
       const id = (p.valid || "") + "|" + (p.type || "") + "|" + (p.city || "") + "|" + (p.magnitude || "");
