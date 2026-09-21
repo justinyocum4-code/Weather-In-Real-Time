@@ -821,8 +821,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.3.0";
-const WRT_VERSION_CODE = 48;
+const WRT_VERSION = "3.3.1";
+const WRT_VERSION_CODE = 49;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1480,7 +1480,7 @@ function panToAlert(p, immediate) {
 
 /* Idle drift: when the radar has been quiet, the camera slowly wanders the
    country like YallBot's stream — it never just sits still. Any real alert,
-   storm report, quake, or manual touch takes over instantly and pauses the
+   storm report or manual touch takes over instantly and pauses the
    drift for a while. */
 let driftTimer = null, driftPausedUntil = 0, driftIndex = 0;
 const DRIFT_POINTS = [
@@ -1504,8 +1504,7 @@ function startIdleDrift() {
       // Anything happening takes priority over the drift.
       if (presenter.busy || presenter.queue.length) return;
       if (currentFeatures.length || currentLsrs.length) return;
-      if ((quakeLayer && quakeLayer.getLayers().length) ||
-          (stormCellLayer && stormCellLayer.getLayers().length)) return;
+      if (stormCellLayer && stormCellLayer.getLayers().length) return;
       driftIndex = (driftIndex + 1) % DRIFT_POINTS.length;
       const p = DRIFT_POINTS[driftIndex];
       // Gentle wander: a long slow pan at the national view. The radar loop
@@ -1754,7 +1753,6 @@ const nextAside = cycler([
   "Not gonna lie, this one's got my attention.",
   "The atmosphere woke up and chose violence.",
   "Classic. Just classic.",
-  "Nimbus is already hiding under the desk.",
   "I did NOT order this weather.",
   "Somebody up there is bored.",
   "The clouds are throwing hands today.",
@@ -1764,7 +1762,6 @@ const nextAside = cycler([
   "Rude. Absolutely rude weather.",
   "I'd cancel my outdoor plans if I were you. Just saying.",
   "Mother Nature skipped her coffee this morning.",
-  "Nimbus just knocked my coffee over. Anyway,",
   "If the sky had a customer service line, I'd be on hold,",
   "The jet stream's doing parkour again,",
   "Somewhere, a meteorologist just spit out their coffee,",
@@ -1852,7 +1849,7 @@ let storyIndex = 0;
 /* Colorful ways to say the event name — gives the voice character. */
 /* ============ YallBot-style voice ============
    Warnings follow a strict template: location -> threat/motion -> towns in
-   path -> safety action. Personality (sass, Nimbus, asides) lives ONLY in
+   path -> safety action. Personality (sass, asides) lives ONLY in
    calm-weather chatter — never inside a warning. */
 
 /* "until 9:45 AM Eastern" from the expires timestamp. The time is computed from
@@ -1937,72 +1934,46 @@ function svrHook(area) {
   return _svrHookDeal().split("{A}").join(area || "the warned area");
 }
 
-/* Calm-weather personality — Nimbus, theatrical asides, snack jokes.
+/* Calm-weather personality — theatrical asides, snack jokes.
    NEVER used inside warnings. Full sarcasm allowed here. */
 const calmAside = cycler([
-  "Nimbus is sniffing the upstream data. Says it's quiet out there. Good dog.",
   "We're tracking this live, folks. Keep an eye up.",
   "GASPS DRAMATICALLY! Just kidding — it's calm. Had to keep you on your toes.",
   "Quiet on the radar. I'll take it.",
-  "Nimbus wanted a snack, but all I had was upstream data. He ate it anyway.",
   "Slow weather day. The radar's just vibing.",
   "I'm watching the whole country for you, y'all. Not a thing popping off right now.",
-  "Radar's so quiet I can hear Nimbus snoring.",
   "All clear. Even the clouds are behaving. Suspicious, honestly.",
   "Nothing but calm skies on the radar. Kidding aside — it's genuinely quiet.",
   "The atmosphere's taking a nap. Let's not wake it.",
-  "Nimbus gives the radar two paws up. Quiet day.",
   "I've stared at this radar so long I'm starting to see shapes. Still no storms though.",
-  "Calmest radar I've seen all week. Nimbus is disappointed — he loves the drama.",
   "No warnings, no watches, no drama. The weather's on its best behavior.",
   "It's so quiet out there, I'm narrating my own thoughts. This is fine.",
   "Radar check: whole lotta nothing. Beautiful.",
   "The sky's being suspiciously polite today.",
-  "Nimbus just yawned. That tells you everything about the radar right now.",
   "Zero alerts nationwide. I'm as shocked as you are.",
   "Peaceful skies. Don't worry, I'll find something to talk about.",
-  "Weather's calm, radar's clean, Nimbus is napping. Living the dream.",
-  "The radar is so calm, Nimbus filed a noise complaint about the silence.",
   "I asked the clouds for drama and they said, new phone, who dis.",
   "Weather update: the sky is doing absolutely nothing, and doing it beautifully.",
   "It's quieter than a library in here. A library full of clouds.",
   "No storms. I checked twice because I don't trust my own eyes.",
   "The atmosphere called in calm today. Must be nice.",
-  "Nimbus is snoring so loud the radar picked it up as precipitation.",
   "Breaking: nothing is happening. More at eleven. Actually, less at eleven.",
   "I polished the radar dish out of boredom. You're welcome, science.",
 ]);
 
-/* Nimbus, the four-legged co-presenter — YallBot has an AI dog named Nimbus,
-   and so do we. Short sidekick bits for check-ins and quiet stretches. */
-const nextNimbus = cycler([
-  "Nimbus is on radar duty. He's very professional. Mostly.",
-  "Nimbus sniffed the data feed. All clear, he says. I trust the nose.",
-  "Sidekick update: Nimbus is napping on the warm receiver. Morale is high.",
-  "Nimbus just did a perimeter check of the studio. No storms found. Good dog.",
-  "Nimbus rates this quiet stretch five out of five naps.",
-  "Nimbus is chewing the corner of the national map. The Midwest is now a chew toy.",
-  "My four-legged co-presenter Nimbus says the radar looks boring. He's not wrong.",
-  "Nimbus tried to chase a cloud on the satellite loop. He's an optimist.",
-  "Nimbus just barked at the radar. False alarm — it was a smudge. We're working on his training.",
-  "Co-presenter Nimbus is demanding snacks. I told him he only eats upstream data. He ate it anyway.",
-]);
 
 /* Clumsy presenter bits — lovable goof energy. Calm-weather chatter ONLY,
    never inside a warning. */
 const nextClumsy = cycler([
   "Okay, I just tripped over the radar cable. We're fine. Everything's fine.",
-  "Nimbus just walked across my keyboard. If the radar spins, that's why.",
   "I spilled coffee on the weather desk again. The forecast is still dry though.",
   "Hold on, my chair just tried to escape. Anyway — all quiet out there.",
   "I read that county name wrong three times in my head before we got here. Moving on.",
   "Fun fact: I once walked into a doorframe during a tornado warning. True story.",
-  "Nimbus ate my notes, so we're winging this one. Radar's calm, that's the whole report.",
   "I bumped the microphone. Sorry about that. Professional, I know.",
   "My teleprompter just gave up on me. We're doing this from memory.",
   "I tried to point at the radar and pointed at the wrong state. Classic me.",
   "Heads up: the presenter is clumsier than the weather today.",
-  "Nimbus is chasing his tail next to the radar. Try to ignore him.",
   "I just sneezed during the satellite loop. Bless me.",
   "If I mispronounce your county, take it up with my mouth, not me.",
   "I waved at the radar and it waved back. I think we're friends now.",
@@ -2011,7 +1982,6 @@ const nextClumsy = cycler([
   "Tripped over the radar cable. The whole country's wobbling. Sorry about that.",
   "My notes say 'be professional.' My brain says 'tell them about the pigeon.' The pigeon won.",
   "I rehearsed this county name in the mirror. Still botched it. Growth.",
-  "Nimbus just photobombed the satellite loop. He's famous now.",
   "I spilled water on the forecast. The forecast is now 'damp.'",
   "Tried to look serious pointing at the map. Pointed at my own face. Nailed it.",
   "The autocue scrolled too fast and I just went with it. Hope that made sense.",
@@ -2020,38 +1990,28 @@ const nextClumsy = cycler([
 /* Random non-weather chatter — jokes and observations between reports, like
    YallBot riffing while nothing's happening. Calm weather ONLY. */
 const nextRandom = cycler([
-  "In non-weather news, Nimbus just tried to chase a cloud. He's an optimist.",
   "Quick break from the weather: I tried to make coffee and the radar judged me.",
   "Not weather-related, but I just remembered I left my umbrella somewhere. It's fine.",
-  "Studio update: Nimbus is asleep on the national map. The Midwest is now a dog.",
   "Between storms, a thought: whoever named the sundog really committed to the bit.",
   "Non-weather bulletin: my chair squeaks in D minor. Anyway.",
-  "I asked Nimbus for his forecast. He barked once. Make of that what you will.",
   "Random thought: clouds are just sky sheep, and nobody can convince me otherwise.",
   "In other news, I finally learned how to pronounce Mackinac. You're welcome.",
   "Studio memo: someone — me — left the radar on spin cycle. It's mesmerizing.",
   "Not a weather alert, just a feeling: today's a good day to drink water and mind your business.",
   "I tried to high-five the satellite image. My hand went through the screen. Science is wild.",
-  "Fun question from the studio: if a tree falls in a forest and nobody's there, does it still need a weather alert? Asking for Nimbus.",
   "Reminder from your clumsy weather friend: stretch, hydrate, and don't lick frozen flagpoles.",
-  "Nimbus rates today's sky four out of five naps. High praise.",
   "I named one of the clouds Kevin. Kevin's doing great today.",
-  "Nimbus just barked at thunder three counties away. Early warning system: online.",
   "I tried to nap during the quiet stretch. The radar tattled on me.",
   "Somewhere, someone just said 'looks like rain' while staring directly at rain.",
   "Weather confession: I have a favorite cloud. Don't tell the others.",
   "The jet stream called. It wants its drama back.",
-  "Nimbus gives this quiet stretch two paws up. He's easy to please.",
   "If the sky were a group chat, it'd be muted right now. Peaceful.",
   "I just watched a tumbleweed cross the radar. Not weather. Just vibing.",
   "Hotdog vendors across America are enjoying this calm. Respect.",
   "Somewhere a kid is disappointed there's no thunder to be scared of. Lucky kid.",
   "The radar's so calm I could hear a raindrop. If there were one.",
-  "Nimbus update: he found a sunbeam and filed for permanent residency.",
-  "I asked Nimbus for the forecast. He wagged. Take that as you will.",
   "If you're grilling right now, the sky approves. Carry on.",
   "Breaking: absolutely nothing is happening, and honestly? We love that.",
-  "The clouds are doing that thing where they look like stuff. I'm seeing a dragon. Nimbus sees lunch.",
   "Somewhere out there, somebody's grill cover is about to become a kite. Stay vigilant.",
   "Pro tip: lick your finger, hold it up, congratulations — you're a weather instrument.",
   "No storms right now, so I'm just vibing. The radar's vibing. We're all vibing.",
@@ -2366,12 +2326,10 @@ const nextStartupOpener = cycler([
 ]);
 const nextStartupClear = cycler([
   "Weather In Real Time. All clear. No active weather alerts — the sky's on its best behavior.",
-  "Weather In Real Time. Good news — not a single active alert right now. Nimbus is disappointed, I'm relieved.",
   "Weather In Real Time. The country's quiet. No active alerts to report, so I'm just vibing with the radar.",
   "Weather In Real Time. All quiet nationwide. Nothing to warn about — suspiciously peaceful, honestly.",
   "Weather In Real Time. Skies are calm — zero active alerts. Enjoy it while it lasts, folks.",
   "Weather In Real Time. Clean sweep — no alerts anywhere in the country. Even the clouds are behaving.",
-  "Weather In Real Time. Nothing popping off out there. Radar's clean, Nimbus is napping, life is good.",
   "Weather In Real Time. All clear, coast to coast. I'll holler the second that changes — promise.",
 ]);
 const nextStartupAlerts = cycler([
@@ -2423,14 +2381,14 @@ function chatterUpdate() {
   if (chatterMode() === "off") return;
   const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
   if (!feats.length) {
-    // Quiet: personality lives here. Nimbus, asides, all-clear with character.
+    // Quiet: personality lives here. Asides and all-clear with character.
     // Speaks up every few minutes so the quiet stretches feel alive.
     const now = Date.now();
     if (now - lastAllClear > 5 * 60000) {
       lastAllClear = now;
       // Pick two DIFFERENT bits and sometimes riff them back-to-back,
       // so the quiet stretches feel like a real presenter thinking aloud.
-      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear(), nextNimbus()];
+      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear()];
       const first = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
       queueSpeech(first, 60);
       if (Math.random() < 0.3) {
@@ -2455,17 +2413,13 @@ const nextAllClear = cycler([
   "All quiet out there, y'all. No active weather alerts in the country right now. I'm still watching — I'll holler the moment something pops up.",
   "Radar's clean, skies are calm. Not a single alert in the whole country. Enjoy it while it lasts.",
   "Nothing to report, folks. The entire country's behaving itself. I'll let you know the second that changes.",
-  "All clear nationwide. Even Nimbus is bored. I'm still on watch, don't worry.",
   "Zero active alerts. The weather's taking the day off, and honestly? Good for it.",
-  "Quiet across the board. No warnings, no watches. Just me, the radar, and Nimbus.",
   "The country's calm. Almost too calm. I'm watching anyway.",
   "All clear. I'll be here staring at the radar so you don't have to.",
   "All clear nationwide. I'm going to try not to trip over anything while we wait.",
-  "Zero alerts. Nimbus is disappointed, I'm relieved, everybody wins.",
   "The radar's so clean you could eat off it. Don't, though.",
   "Even the clouds are taking a nap.",
   "It's suspiciously peaceful. I'm watching anyway.",
-  "Nimbus is napping on the warm receiver. All clear.",
   "Zero alerts, zero drama, one happy weather nerd.",
   "Nothing happening anywhere. I double-checked so you don't have to trust my coordination.",
 ]);
@@ -2487,7 +2441,6 @@ const nextCheckin = cycler([
   "Haven't taken my eyes off it.",
   "Still in the crosshairs.",
   "Keeping it on the front burner.",
-  "Back on this one. Nimbus sends his regards.",
   "Still on this one, chief.",
   "Back to this storm, boss.",
   "Keeping tabs on this one, partner.",
@@ -2600,83 +2553,6 @@ async function pollStormReports() {
         seenLsrIds.add(id);
         onNewStormReport(f);
       }
-    }
-  } catch (e) {}
-}
-
-/* ============ USGS earthquakes (no key needed) ============
-   Significant quakes get announced, marked on the map, and the radar swings
-   over to the epicenter. Big ones (M6+) speak even in quiet hours — that's
-   safety, not chatter. */
-let quakeLayer = null;
-let seenQuakeIds = new Set();
-try {
-  if (typeof LynxosStore !== "undefined" && LynxosStore.getItem) {
-    const raw = LynxosStore.getItem("quake_seen_ids");
-    if (raw) seenQuakeIds = new Set(JSON.parse(raw));
-  }
-} catch (e) {}
-function saveQuakeIds() {
-  try {
-    if (typeof LynxosStore !== "undefined" && LynxosStore.setItem) {
-      LynxosStore.setItem("quake_seen_ids", JSON.stringify([...seenQuakeIds].slice(-200)));
-    }
-  } catch (e) {}
-}
-
-function quakeColor(mag) {
-  if (mag >= 6) return "#ff2222";
-  if (mag >= 5) return "#ff8800";
-  return "#ffdd00";
-}
-
-function nextQuakeLine(mag, place) {
-  const m = mag.toFixed(1);
-  if (mag >= 6) {
-    return "Heads up. A magnitude " + m + " earthquake just struck " + place +
-      ". If you're anywhere near there, drop, cover, and hold on until the shaking stops.";
-  }
-  const lines = [
-    "The earth just hiccuped — a magnitude " + m + " earthquake near " + place + ".",
-    "Seismic side quest, folks — magnitude " + m + " earthquake near " + place + ".",
-    "Did the ground just move for you? Magnitude " + m + " earthquake near " + place + ".",
-    "Nimbus felt that one — magnitude " + m + " earthquake near " + place + "."
-  ];
-  return lines[Math.floor(Math.random() * lines.length)];
-}
-
-async function fetchQuakes() {
-  try {
-    const r = await fetch("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson");
-    if (!r.ok) return;
-    const data = await r.json();
-    const feats = data.features || [];
-    if (map) {
-      if (quakeLayer) { try { map.removeLayer(quakeLayer); } catch (e) {} }
-      quakeLayer = L.layerGroup().addTo(map);
-      for (const f of feats) {
-        const p = f.properties || {};
-        const coords = f.geometry && f.geometry.coordinates;
-        if (!coords || coords.length < 2 || p.mag == null) continue;
-        const color = quakeColor(p.mag);
-        const mk = L.circleMarker([coords[1], coords[0]], {
-          radius: Math.min(16, 5 + p.mag), color, weight: 2, fillColor: color, fillOpacity: 0.55
-        }).addTo(quakeLayer);
-        mk.bindTooltip("M" + p.mag.toFixed(1) + " earthquake", { permanent: false });
-      }
-    }
-    for (const f of feats) {
-      const p = f.properties || {};
-      if (p.mag == null) continue;
-      const id = f.id || (p.time + "|" + p.mag);
-      if (seenQuakeIds.has(id)) continue;
-      seenQuakeIds.add(id);
-      saveQuakeIds();
-      const big = p.mag >= 6;
-      if (isQuietHours() && !big) continue; // moderate quakes wait for morning
-      const coords = f.geometry && f.geometry.coordinates;
-      const move = (coords && coords.length >= 2) ? { lat: coords[1], lon: coords[0], zoom: 6 } : null;
-      queueSpeech(nextQuakeLine(p.mag, p.place || "an unknown location"), big ? 96 : 75, move);
     }
   } catch (e) {}
 }
@@ -2880,7 +2756,6 @@ function computeWIS() {
 
 const _wisQuiet = cycler([
   "Pretty quiet across the country right now.",
-  "Calm nationwide. Nimbus approves.",
   "Barely a blip on the national radar.",
   "So quiet you could hear a raindrop.",
   "The whole country's on its best behavior.",
@@ -3382,9 +3257,7 @@ if (!store.get("lat", "") || !store.get("lon", "")) {
   });
 setInterval(pollAlerts, 60000);
 setInterval(chatterUpdate, 180000);
-setInterval(fetchQuakes, 5 * 60 * 1000); // USGS significant earthquakes
 setInterval(fetchMesoscaleDiscussions, 10 * 60 * 1000); // SPC forecaster discussions
-setTimeout(fetchQuakes, 20000); // quake check shortly after launch
 setTimeout(fetchMesoscaleDiscussions, 90000); // MD check after startup settles
 // The presenter drives the tour itself: when it runs dry it pulls the next
 // top warning, so the radar never sits still and voice always matches the map.
