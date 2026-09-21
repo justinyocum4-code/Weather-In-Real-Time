@@ -810,6 +810,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Voice</span>
       <select id="voice-select" aria-label="Choose voice" style="max-width:60%;font-size:15px;padding:10px;border-radius:10px;border:2px solid var(--gold);background:#0a0a0a;color:var(--gold);font-weight:bold;"></select>
     </div>
+    <div class="setting-row">
+      <span>Background music</span>
+      <button type="button" class="toggle" id="tgl-music" aria-pressed="true">On</button>
+    </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
 </div>
@@ -817,8 +821,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.1.0";
-const WRT_VERSION_CODE = 46;
+const WRT_VERSION = "3.2.0";
+const WRT_VERSION_CODE = 47;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -908,15 +912,21 @@ const presenter = {
   queue: [],
   busy: false,
   currentId: null,
+  currentItem: null,
   fallbackTimer: null,
+  epoch: 0, // bumped by clear(): a stale fly-to arrival stays silent
 
   /* move: {lat, lon, zoom} or null. score >= 900 interrupts everything. */
   add(text, move, score) {
     if (!voice.enabled || !text) return;
     score = score || 50;
     if (score >= 900) {
+      // Park whatever was playing and let it finish right after the urgent
+      // news — a warning jumping in no longer kills a report mid-sentence.
+      const resume = this.currentItem;
       this.clear();
       this.queue.unshift({ text, move: move || null, score });
+      if (resume) this.queue.push(resume);
       this.pump();
       return;
     }
@@ -934,6 +944,9 @@ const presenter = {
     this.queue.length = 0;
     this.busy = false;
     this.currentId = null;
+    this.currentItem = null;
+    this.epoch++;
+    musicDuck(false);
     if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
     try { ttsStop(); } catch (e) {}
   },
@@ -942,7 +955,12 @@ const presenter = {
     if (this.busy || !this.queue.length || !voice.enabled) return;
     this.busy = true;
     const item = this.queue.shift();
+    this.currentItem = item;
+    const myEpoch = this.epoch;
     const doSpeak = () => {
+      if (myEpoch !== this.epoch) return; // cleared mid-flight: stay silent
+      ensureMusic();
+      musicDuck(true); // dip the music bed while the voice reports
       const id = ttsSpeak(item.text);
       if (!id) {
         // Device TTS still warming up: the native side queued this utterance
@@ -988,6 +1006,8 @@ const presenter = {
     if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
     this.busy = false;
     this.currentId = null;
+    this.currentItem = null;
+    musicDuck(false); // voice done — swell the music back up
     setTimeout(() => { this.pump(); scheduleTourNext(); }, 700);
   }
 };
@@ -1006,6 +1026,120 @@ window.addEventListener("error", (e) => {
 window.__onTtsDone = function (id) {
   presenter.onUtteranceDone(id);
 };
+
+/* ============ Background music: a soft generative ambient pad ============
+   Synthesized live with the Web Audio API — no audio files, no network, no
+   copyright or licensing to worry about, ever. It sits quietly under the
+   radar, dips down while the voice gives a report, and swells back up when
+   she's done. Toggle in Settings. Starts on first tap or first announcement
+   (mobile autoplay rules need a user gesture before audio can begin). */
+let musicCtx = null, musicMaster = null, musicTimer = null;
+let musicChordIdx = 0, musicNextChordAt = 0, musicNextSparkleAt = 0;
+function musicEnabled() { return store.get("music", "on") === "on"; }
+function midiHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+/* Warm, never tense: Cmaj9 -> Am9 -> Fmaj9 -> G add9, 14 seconds each. */
+const MUSIC_CHORDS = [
+  [48, 55, 62, 64, 71],
+  [45, 52, 60, 64, 71],
+  [41, 48, 57, 60, 67],
+  [43, 50, 59, 62, 66]
+];
+const MUSIC_SPARKLE = [72, 74, 76, 79, 81, 84, 86];
+function ensureMusic() {
+  if (!musicEnabled()) return;
+  if (musicCtx) {
+    if (musicCtx.state === "suspended") { try { musicCtx.resume(); } catch (e) {} }
+    return;
+  }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    musicCtx = new AC();
+    musicMaster = musicCtx.createGain();
+    musicMaster.gain.value = 0;
+    musicMaster.connect(musicCtx.destination);
+    if (musicCtx.state === "suspended") {
+      const wake = () => { try { musicCtx.resume(); } catch (e) {} };
+      window.addEventListener("pointerdown", wake, { once: true });
+      window.addEventListener("touchstart", wake, { once: true });
+      window.addEventListener("keydown", wake, { once: true });
+    }
+    const now = Date.now();
+    musicNextChordAt = now;
+    musicNextSparkleAt = now + 12000;
+    if (!musicTimer) musicTimer = setInterval(musicTick, 2000);
+    musicDuck(false);
+  } catch (e) { musicCtx = null; }
+}
+function musicPlayChord(notes) {
+  if (!musicCtx || !musicMaster) return;
+  try {
+    const t = musicCtx.currentTime;
+    for (const m of notes) {
+      for (const detune of [-5, 5]) {
+        const o = musicCtx.createOscillator();
+        o.type = "sine";
+        o.frequency.value = midiHz(m);
+        o.detune.value = detune;
+        const g = musicCtx.createGain();
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.05, t + 4);
+        g.gain.setValueAtTime(0.05, t + 10);
+        g.gain.linearRampToValueAtTime(0, t + 14);
+        o.connect(g); g.connect(musicMaster);
+        o.start(t); o.stop(t + 14.5);
+      }
+    }
+  } catch (e) {}
+}
+function musicSparkle() {
+  if (!musicCtx || !musicMaster) return;
+  try {
+    const t = musicCtx.currentTime;
+    const o = musicCtx.createOscillator();
+    o.type = "sine";
+    o.frequency.value = midiHz(MUSIC_SPARKLE[Math.floor(Math.random() * MUSIC_SPARKLE.length)]);
+    const g = musicCtx.createGain();
+    g.gain.setValueAtTime(0.02, t);
+    g.gain.exponentialRampToValueAtTime(0.0005, t + 3.5);
+    // A touch of echo so the chime hangs in the air.
+    const d = musicCtx.createDelay(1.0);
+    d.delayTime.value = 0.42;
+    const fb = musicCtx.createGain(); fb.gain.value = 0.35;
+    const wet = musicCtx.createGain(); wet.gain.value = 0.4;
+    o.connect(g);
+    g.connect(musicMaster);
+    g.connect(d); d.connect(fb); fb.connect(d); d.connect(wet); wet.connect(musicMaster);
+    o.start(t); o.stop(t + 4);
+  } catch (e) {}
+}
+function musicTick() {
+  if (!musicEnabled() || !musicCtx || musicCtx.state !== "running") return;
+  const now = Date.now();
+  if (now >= musicNextChordAt) {
+    musicPlayChord(MUSIC_CHORDS[musicChordIdx % MUSIC_CHORDS.length]);
+    musicChordIdx++;
+    musicNextChordAt = now + 14000;
+  }
+  if (now >= musicNextSparkleAt) {
+    musicSparkle();
+    musicNextSparkleAt = now + 15000 + Math.random() * 15000;
+  }
+}
+/* Duck the bed under the voice, swell it back up after. */
+function musicDuck(down) {
+  if (!musicCtx || !musicMaster) return;
+  try {
+    const t = musicCtx.currentTime;
+    musicMaster.gain.cancelScheduledValues(t);
+    musicMaster.gain.setTargetAtTime(down ? 0.008 : (musicEnabled() ? 0.05 : 0), t, down ? 0.4 : 1.5);
+  } catch (e) {}
+}
+function stopMusic() {
+  if (musicTimer) { clearInterval(musicTimer); musicTimer = null; }
+  try { if (musicCtx) musicCtx.close(); } catch (e) {}
+  musicCtx = null; musicMaster = null;
+}
 
 /* Queue speech. Higher score = sooner. 900+ interrupts what's playing.
    move is optional {lat, lon, zoom} — the radar flies there first. */
@@ -2861,6 +2995,26 @@ document.getElementById("tgl-voice").addEventListener("click", () => {
   document.getElementById("btn-mute").click();
 });
 
+function syncMusicToggle() {
+  const t = document.getElementById("tgl-music");
+  const on = musicEnabled();
+  t.setAttribute("aria-pressed", String(on));
+  t.textContent = on ? "On" : "Off";
+}
+document.getElementById("tgl-music").addEventListener("click", () => {
+  const on = !musicEnabled();
+  store.set("music", on ? "on" : "off");
+  syncMusicToggle();
+  if (on) {
+    ensureMusic();
+    musicDuck(false);
+    queueSpeech("Background music on.", 999);
+  } else {
+    musicDuck(false);
+    stopMusic();
+  }
+});
+
 function syncQuietToggle() {
   const on = store.get("quiet", "1") === "1";
   const t = document.getElementById("tgl-quiet");
@@ -2944,6 +3098,7 @@ document.getElementById("app-version").textContent = WRT_VERSION;
 syncVoiceToggle();
 syncQuietToggle();
 syncChatterToggle();
+syncMusicToggle();
 updateLocStatus();
 tickClock();
 setInterval(tickClock, 30000);
