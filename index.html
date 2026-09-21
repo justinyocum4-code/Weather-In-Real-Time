@@ -821,8 +821,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.2.0";
-const WRT_VERSION_CODE = 47;
+const WRT_VERSION = "3.3.0";
+const WRT_VERSION_CODE = 48;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -2079,7 +2079,7 @@ const nextTake = cycler([
   "Strong opinion: sunshine before 7 AM doesn't count. I said what I said.",
 ]);
 
-function buildAnnouncement(p) {
+function buildAnnouncement(p, f) {
   const event = p.event || "Weather alert";
   const ev = event.toLowerCase();
   const area = formatArea(p);
@@ -2088,27 +2088,25 @@ function buildAnnouncement(p) {
   let text = "";
 
   if (/tornado warning/i.test(ev)) {
-    // Location -> threat/motion -> towns in path -> action.
+    // Location -> threat -> storm detail (position, motion, cities in path) -> towns -> action.
     text = (area ? area + ": " : "") + "tornado warning" + (exp ? " " + exp + "." : ".");
-    const motion = extractMotion(desc);
     const towns = extractTowns(desc);
     const threat = tornadoThreat(p);
-    text += " Radar's tracking " + threat;
-    if (motion) text += ", " + motion.replace(/^heading /, "sliding ");
-    else text += " in the warned area";
-    text += ".";
+    text += " Radar's tracking " + threat + ".";
+    const detail = stormDetail(desc, f);
+    if (detail) text += " " + detail;
     if (towns) text += " In the path: " + towns + ".";
     text += " " + nextTornadoSafety();
     if (/mobile/i.test(desc) || Math.random() < 0.4) {
       text += " Mobile homes aren't safe — get to sturdier shelter immediately.";
     }
   } else if (/severe thunderstorm warning/i.test(ev)) {
-    // Impact hook -> warning + expiration + counties -> motion/hazards -> action.
+    // Impact hook -> warning + expiration + counties -> storm detail/hazards -> action.
     text = svrHook(area || "the warned area") + " ";
     text += "Severe thunderstorm warning" + (exp ? " runs " + exp : "") +
             (area ? " for " + area : "") + ".";
-    const motion = extractMotion(desc);
-    if (motion) text += " The line is " + motion.replace(/^heading /, "sliding ") + ".";
+    const detail = stormDetail(desc, f);
+    if (detail) text += " " + detail;
     const haz = extractHazards(desc);
     if (haz) text += " " + haz;
     text += " Get inside now.";
@@ -2128,12 +2126,12 @@ function buildAnnouncement(p) {
     // Everything else: conversational but structured.
     text = nextOpener() + " " + event.toLowerCase() + (area ? ", covering " + area : "") +
            (exp ? ", " + exp : "") + ".";
-    const motion = extractMotion(desc);
-    if (motion) text += " It's " + motion + ".";
+    const detail = stormDetail(desc, f);
+    if (detail) text += " " + detail;
     const impacts = extractRoadImpacts(desc);
     if (impacts) text += " They're reporting " + impacts;
   }
-  if (text.length > 500) text = text.slice(0, 500) + ".";
+  if (text.length > 650) text = text.slice(0, 650) + ".";
   return text;
 }
 
@@ -2164,10 +2162,172 @@ function extractRoadImpacts(desc) {
   return found.length ? found.join(", ") + "." : null;
 }
 
-function extractMotion(desc) {
-  const m = desc.match(/moving\s+(north|northeast|east|southeast|south|southwest|west|northwest)(?:\s+at\s+(\d+)\s*mph)?/i);
-  if (m) return m[2] ? ("heading " + m[1] + " at about " + m[2] + " miles an hour") : ("heading " + m[1]);
-  return null;
+/* ============ Detailed storm tracking ("what cities is it moving toward?") ====
+   Parses the NWS warning text for the storm's location, motion, and speed,
+   then projects the motion vector forward over a gazetteer of major US
+   cities to name what's in the path — plus distance from the listener and
+   any highways the warning names. All offline, no extra network calls. */
+const DIR_DEGREES = { north: 0, northeast: 45, east: 90, southeast: 135, south: 180, southwest: 225, west: 270, northwest: 315 };
+
+function parseStormMotion(desc, fallback) {
+  if (!desc) return null;
+  const out = { dirWord: null, dirDeg: null, speedMph: null, locPhrase: null, lat: null, lon: null };
+  // TIME...MOT...LOC 0126Z 240DEG 29KT 3240 9718 — lat DDMM, lon DDMM (west).
+  const mot = desc.match(/TIME\.\.\.MOT\.\.\.LOC\s+\d+Z\s+(\d+)DEG\s+(\d+)KT\s+(\d{4,5})\s+(\d{4,5})/i);
+  if (mot) {
+    out.dirDeg = parseInt(mot[1], 10) % 360;
+    out.speedMph = Math.round(parseInt(mot[2], 10) * 1.151);
+    const la = mot[3], lo = mot[4];
+    out.lat = parseInt(la.slice(0, 2), 10) + parseInt(la.slice(2), 10) / 60;
+    const loDeg = lo.length >= 5 ? 3 : 2;
+    out.lon = -(parseInt(lo.slice(0, loDeg), 10) + parseInt(lo.slice(loDeg), 10) / 60);
+    // The MOT line is authoritative — derive the spoken direction from it.
+    const compass8 = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+    out.dirWord = compass8[Math.round(out.dirDeg / 45) % 8];
+  }
+  // "a severe thunderstorm was located near Lynn Haven, moving southwest at 20 mph."
+  const loc = desc.match(/was located\s+([^,.\n]+?)(?:,|\.|\n)/i);
+  if (loc) out.locPhrase = loc[1].replace(/\s+/g, " ").trim();
+  const mv = desc.match(/moving\s+(northeast|northwest|southeast|southwest|north|south|east|west)(?:\s+at\s+(\d+)\s*mph)?/i);
+  if (mv) {
+    if (!mot) out.dirWord = mv[1].toLowerCase();
+    if (out.dirDeg == null) out.dirDeg = DIR_DEGREES[mv[1].toLowerCase()];
+    if (mv[2]) out.speedMph = parseInt(mv[2], 10);
+  }
+  if (fallback && out.lat == null) { out.lat = fallback.lat; out.lon = fallback.lon; }
+  return (out.dirWord || out.locPhrase || out.lat != null) ? out : null;
+}
+
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const dLon = (lon2 - lon1) * r;
+  const y = Math.sin(dLon) * Math.cos(lat2 * r);
+  const x = Math.cos(lat1 * r) * Math.sin(lat2 * r) -
+            Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos(dLon);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+/* Major US cities [name, lat, lon] for "tracking toward" projections. */
+const STORM_PATH_CITIES = [
+["New York",40.71,-74.0],["Los Angeles",34.05,-118.24],["Chicago",41.88,-87.63],
+["Houston",29.76,-95.37],["Phoenix",33.45,-112.07],["Philadelphia",39.95,-75.17],
+["San Antonio",29.42,-98.49],["San Diego",32.72,-117.16],["Dallas",32.78,-96.8],
+["Fort Worth",32.76,-97.33],["Austin",30.27,-97.74],["Columbus",39.96,-83.0],
+["Charlotte",35.23,-80.84],["San Francisco",37.77,-122.42],["Indianapolis",39.77,-86.16],
+["Seattle",47.61,-122.33],["Denver",39.74,-104.99],["Oklahoma City",35.47,-97.52],
+["Nashville",36.16,-86.78],["El Paso",31.76,-106.49],["Washington",38.9,-77.04],
+["Boston",42.36,-71.06],["Las Vegas",36.17,-115.14],["Portland",45.52,-122.68],
+["Memphis",35.15,-90.05],["Louisville",38.25,-85.76],["Baltimore",39.29,-76.61],
+["Milwaukee",43.04,-87.91],["Albuquerque",35.08,-106.65],["Tucson",32.22,-110.97],
+["Fresno",36.74,-119.79],["Sacramento",38.58,-121.49],["Kansas City",39.1,-94.58],
+["Atlanta",33.75,-84.39],["Miami",25.76,-80.19],["Tampa",27.95,-82.46],
+["Orlando",28.54,-81.38],["Jacksonville",30.33,-81.66],["New Orleans",29.95,-90.07],
+["Minneapolis",44.98,-93.27],["St. Louis",38.63,-90.2],["Cleveland",41.5,-81.69],
+["Cincinnati",39.1,-84.51],["Pittsburgh",40.44,-79.99],["Detroit",42.33,-83.05],
+["Buffalo",42.89,-78.88],["Hartford",41.77,-72.67],["Providence",41.82,-71.41],
+["Albany",42.65,-73.76],["Richmond",37.54,-77.44],["Norfolk",36.85,-76.29],
+["Raleigh",35.78,-78.64],["Columbia",34.0,-81.03],["Charleston",32.78,-79.93],
+["Jackson",32.3,-90.18],["Birmingham",33.52,-86.8],["Montgomery",32.38,-86.3],
+["Huntsville",34.73,-86.59],["Little Rock",34.75,-92.29],["Tulsa",36.15,-95.99],
+["Wichita",37.69,-97.34],["Omaha",41.26,-95.93],["Des Moines",41.59,-93.62],
+["Amarillo",35.2,-101.83],["Lubbock",33.58,-101.86],["Abilene",32.45,-99.73],
+["Waco",31.55,-97.15],["Corpus Christi",27.8,-97.4],["Midland",31.99,-102.08],
+["Fort Smith",35.39,-94.4],["Springfield",37.21,-93.29],["Topeka",39.05,-95.68],
+["Lincoln",40.81,-96.7],["Sioux Falls",43.55,-96.73],["Fargo",46.88,-96.79],
+["Bismarck",46.81,-100.78],["Billings",45.78,-108.5],["Boise",43.62,-116.2],
+["Spokane",47.66,-117.43],["Salt Lake City",40.76,-111.89],["Reno",39.53,-119.81],
+["Cheyenne",41.14,-104.82],["Colorado Springs",38.83,-104.82],["Santa Fe",35.69,-105.94],
+["Flagstaff",35.2,-111.65],["Bakersfield",35.37,-119.02],["Oakland",37.8,-122.27],
+["Honolulu",21.31,-157.86],["Anchorage",61.22,-149.9],["Denton",33.21,-97.13],
+["Arlington",32.74,-97.11],["Plano",33.02,-96.7],["Tyler",32.35,-95.3],
+["Longview",32.5,-94.74],["Texarkana",33.43,-94.04],["Sherman",33.64,-96.61],
+["Wichita Falls",33.91,-98.49],["San Angelo",31.46,-100.44],["Laredo",27.53,-99.51],
+["Brownsville",25.93,-97.48],["McAllen",26.2,-98.23],["Victoria",28.8,-97.0],
+["Beaumont",30.08,-94.13],["College Station",30.63,-96.33],["Killeen",31.12,-97.73],
+["Norman",35.22,-97.44],["Lawton",34.6,-98.4],["Enid",36.4,-97.88],
+["Dodge City",37.75,-100.02],["Salina",38.84,-97.61],["Grand Island",40.92,-98.34],
+["Rapid City",44.08,-103.23],["Minot",48.23,-101.3],["Grand Forks",47.91,-97.03],
+["Duluth",46.79,-92.1],["Cedar Rapids",41.98,-91.67],["Davenport",41.52,-90.58],
+["Sioux City",42.5,-96.4],["Columbia MO",38.95,-92.33],["St. Joseph",39.77,-94.85],
+["Springfield IL",39.78,-89.65],["Peoria",40.69,-89.59],["Rockford",42.27,-89.09],
+["Madison",43.07,-89.4],["Green Bay",44.51,-88.02],["Fort Wayne",41.08,-85.14],
+["Evansville",37.97,-87.57],["South Bend",41.68,-86.25],["Grand Rapids",42.96,-85.67],
+["Lansing",42.73,-84.55],["Toledo",41.65,-83.54],["Akron",41.08,-81.52],
+["Dayton",39.76,-84.19],["Lexington",38.04,-84.5],["Bowling Green",36.99,-86.44],
+["Knoxville",35.96,-83.92],["Chattanooga",35.05,-85.31],["Mobile",30.69,-88.04],
+["Tuscaloosa",33.21,-87.53],["Gulfport",30.37,-89.09],["Hattiesburg",31.33,-89.29],
+["Tupelo",34.26,-88.7],["Baton Rouge",30.45,-91.15],["Shreveport",32.53,-93.75],
+["Lafayette",30.22,-92.02],["Lake Charles",30.23,-93.22],["Jonesboro",35.84,-90.7],
+["Augusta",33.47,-81.97],["Macon",32.84,-83.63],["Savannah",32.08,-81.09],
+["Tallahassee",30.44,-84.28],["Pensacola",30.42,-87.22],["Fort Myers",26.64,-81.87],
+["West Palm Beach",26.71,-80.05],["Fort Lauderdale",26.12,-80.14],["Daytona Beach",29.21,-81.02],
+["Gainesville",29.65,-82.32],["Greenville",34.85,-82.39],["Myrtle Beach",33.69,-78.88],
+["Durham",35.99,-78.9],["Winston-Salem",36.1,-80.24],["Asheville",35.6,-82.55],
+["Wilmington",34.22,-77.94],["Virginia Beach",36.85,-75.98],["Roanoke",37.27,-79.94],
+["Charleston WV",38.35,-81.63],["Huntington",38.42,-82.45],["Newark",40.74,-74.17],
+["Atlantic City",39.36,-74.42],["Allentown",40.6,-75.49],["Erie",42.13,-80.09],
+["Harrisburg",40.27,-76.88],["Syracuse",43.05,-76.15],["Bridgeport",41.18,-73.19],
+["New Haven",41.31,-72.93],["Worcester",42.26,-71.8],["Burlington",44.48,-73.21],
+["Manchester",42.99,-71.46],["Portland ME",43.66,-70.26],["Bangor",44.8,-68.77],
+["Tacoma",47.25,-122.44],["Yakima",46.6,-120.51],["Eugene",44.05,-123.09],
+["Salem",44.94,-123.03],["Medford",42.33,-122.87],["Riverside",33.95,-117.4],
+["Long Beach",33.77,-118.19],["Stockton",37.96,-121.29],["Modesto",37.64,-120.99],
+["Oxnard",34.2,-119.18],["Henderson",36.04,-114.98],["Mesa",33.42,-111.83],
+["Provo",40.23,-111.66],["Ogden",41.22,-111.97],["St. George",37.1,-113.58],
+["Nampa",43.54,-116.56],["Idaho Falls",43.49,-112.03],["Missoula",46.87,-113.99],
+["Great Falls",47.51,-111.28],["Casper",42.87,-106.31],["Aurora",39.73,-104.83],
+["Fort Collins",40.59,-105.08],["Pueblo",38.27,-104.61],["Las Cruces",32.31,-106.78],
+["Roswell",33.39,-104.52],["Hilo",19.72,-155.09],["Juneau",58.3,-134.42]
+];
+
+/* Cities lying ahead of the storm along its motion vector (within a 20-degree
+   cone, 8 to 220 miles out), nearest first. */
+function citiesInPath(lat, lon, dirDeg) {
+  const hits = [];
+  for (const c of STORM_PATH_CITIES) {
+    const d = distanceMiles(lat, lon, c[1], c[2]);
+    if (d < 8 || d > 220) continue;
+    let diff = Math.abs(bearingDeg(lat, lon, c[1], c[2]) - dirDeg) % 360;
+    if (diff > 180) diff = 360 - diff;
+    if (diff <= 20) hits.push({ name: c[0], d: d });
+  }
+  hits.sort((a, b) => a.d - b.d);
+  return hits.slice(0, 2).map(h => h.name);
+}
+
+/* Highways the warning names ("near Interstate 35W"). */
+function extractRoads(desc) {
+  const found = [];
+  const re = /\b(Interstate\s+\d+[A-Z]*|I-\d+|U\.?S\.?\s+Highway\s+\d+|State\s+Highway\s+\d+|Highway\s+\d+)\b/gi;
+  let m;
+  while ((m = re.exec(desc)) && found.length < 2) {
+    const r = m[1].replace(/\s+/g, " ").trim();
+    if (!found.includes(r)) found.push(r);
+  }
+  return found.length ? found.join(" and ") : null;
+}
+
+/* One rich detail sentence for a warning: where the storm is, how fast it's
+   moving, what cities it's tracking toward, how far it is from you, and any
+   highways named in the warning. */
+function stormDetail(desc, f) {
+  const c = alertCentroid(f);
+  const sm = parseStormMotion(desc, c);
+  if (!sm) return null;
+  const bits = [];
+  if (sm.locPhrase) bits.push("The storm's " + sm.locPhrase);
+  if (sm.dirWord) bits.push("moving " + sm.dirWord + (sm.speedMph ? " at " + sm.speedMph + " miles an hour" : ""));
+  if (sm.lat != null && sm.dirDeg != null) {
+    const ahead = citiesInPath(sm.lat, sm.lon, sm.dirDeg);
+    if (ahead.length) bits.push("tracking toward " + ahead.join(" and "));
+  }
+  if (userLoc && sm.lat != null) {
+    bits.push("about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, sm.lat, sm.lon)) +
+      " miles " + compassDir(userLoc.lat, userLoc.lon, sm.lat, sm.lon) + " of you");
+  }
+  const roads = extractRoads(desc);
+  if (roads) bits.push("near " + roads);
+  return bits.length ? bits.join(", ") + "." : null;
 }
 
 /* Recap: read out everything currently active, most severe first. */
@@ -2179,7 +2339,7 @@ function recapAlerts() {
   }
   const top = feats.slice(0, 5);
   let text = "Recap. " + feats.length + " active alerts nationwide. The most severe: ";
-  text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {})).join(" ");
+  text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {}, f)).join(" ");
   if (feats.length > 5) text += " Plus " + (feats.length - 5) + " more alerts in the list.";
   const c0 = alertCentroid(feats[0]);
   queueSpeech(text, 999, c0 ? { lat: c0.lat, lon: c0.lon, zoom: 7 } : null);
@@ -2288,7 +2448,7 @@ function chatterUpdate() {
     const p = f.properties || {};
     const c = alertCentroid(f);
     const checkin = Math.random() < 0.5 ? nextCheckin() + " " : "";
-    queueSpeech(checkin + buildAnnouncement(p), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
+    queueSpeech(checkin + buildAnnouncement(p, f), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
   }
 }
 const nextAllClear = cycler([
@@ -2364,6 +2524,24 @@ const seenLsrIds = new Set();
 let currentLsrs = [];
 let lsrLayer = null;
 
+/* IEM Local Storm Report type codes -> spoken names. The feed uses single
+   characters, not words — without this map every hail and wind report
+   sounded like gibberish ("H, 1.75"). */
+const LSR_TYPE_NAMES = {
+  "T": "tornado", "H": "hail",
+  "G": "damaging wind gust", "M": "damaging wind gust",
+  "D": "wind damage", "N": "non-thunderstorm wind gust",
+  "F": "flash flood", "E": "flood",
+  "C": "funnel cloud", "W": "waterspout",
+  "R": "heavy rain", "2": "blowing dust", "x": "debris flow"
+};
+function lsrTypeName(p) {
+  const code = String((p && p.type) || "").trim();
+  if (LSR_TYPE_NAMES[code]) return LSR_TYPE_NAMES[code];
+  const tt = String((p && p.typetext) || "").toLowerCase().replace(/_/g, " ").trim();
+  return tt || "weather report";
+}
+
 /* Storm report icon by report type — plotted right on the radar so the
    reports are visible, not just spoken. Tornado reports pulse. */
 function lsrIcon(type) {
@@ -2400,7 +2578,7 @@ function drawStormReportIcons(feats) {
       } catch (e) { continue; }
       try {
         L.marker([coords[1], coords[0]],
-          { icon: lsrIcon(p.type), interactive: false, keyboard: false }).addTo(lsrLayer);
+          { icon: lsrIcon(lsrTypeName(p)), interactive: false, keyboard: false }).addTo(lsrLayer);
         n++;
       } catch (e) {}
     }
@@ -2521,17 +2699,43 @@ function saveMdIds() {
   } catch (e) {}
 }
 
-function parseMdText(text) {
-  const flat = text.replace(/\r/g, "");
-  const c = flat.match(/CONCERNING\.\.\.([^\n]+)/i);
-  const concerning = c ? c[1].replace(/\s+/g, " ").replace(/\.\.\./g, ", ").trim().toLowerCase() : "";
-  const s = flat.match(/\.\.\.SUMMARY\.\.\.\s*\n([\s\S]*?)\$\$/i);
-  let summary = s ? s[1].replace(/\n(?!\n)/g, " ").replace(/\s+/g, " ").trim() : "";
-  // Trim to the first two sentences so it doesn't ramble.
-  const sentences = summary.match(/[^.!?]+[.!?]+/g) || [summary];
-  summary = sentences.slice(0, 2).join(" ").trim();
-  if (summary.length > 400) summary = summary.slice(0, 397) + "...";
-  return { concerning, summary };
+function decodeEntities(s) {
+  return String(s).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+/* Parse the full forecaster write-up from the <pre> block, keeping line
+   breaks (stripping all tags destroyed them, which is why the old parser
+   only ever got fragments). */
+function parseMdFull(text) {
+  const flat = String(text).replace(/\r/g, "");
+  const get = (re) => {
+    const m = flat.match(re);
+    return m ? m[1].replace(/\.\.\./g, ", ").replace(/\s+/g, " ").trim() : "";
+  };
+  const concerning = get(/CONCERNING\.\.\.([^\n]+)/i).toLowerCase();
+  const areas = get(/Areas affected\.\.\.([^\n]+)/i);
+  const prob = get(/Probability of Watch Issuance\.\.\.([^\n]+)/i);
+  const summary = get(/SUMMARY\.\.\.\s*([\s\S]*?)\n\s*\n/i);
+  let discussion = get(/DISCUSSION\.\.\.\s*([\s\S]*?)(?:\$\$|$)/i);
+  // Cut the forecaster signature and the unspeakable ATTN/LAT-LON blocks.
+  discussion = discussion.replace(/\.\.[A-Za-z]+\/[A-Za-z]+\.\..*$/s, "").trim();
+  const gust = get(/MOST PROBABLE PEAK (?:WIND GUST|HAIL SIZE)\.\.\.([^\n]+)/i);
+  return { concerning, areas, prob, summary, discussion, gust };
+}
+
+/* Split long text into sentence-boundary chunks so urgent alerts can cut in
+   between them in the speech queue. */
+function chunkText(text, max) {
+  const sentences = String(text).match(/[^.!?]+[.!?]+/g) || [String(text)];
+  const chunks = [];
+  let cur = "";
+  for (const s of sentences) {
+    if (cur && (cur + " " + s).trim().length > max) { chunks.push(cur.trim()); cur = s; }
+    else cur += " " + s;
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks;
 }
 
 async function fetchMesoscaleDiscussions() {
@@ -2553,14 +2757,22 @@ async function fetchMesoscaleDiscussions() {
       try {
         const pr = await fetch("https://www.spc.noaa.gov/products/md/md" + num + ".html");
         if (!pr.ok) continue;
-        const text = (await pr.text()).replace(/<[^>]+>/g, " ");
-        if (!/MESOSCALE DISCUSSION/i.test(text)) continue;
-        const parsed = parseMdText(text);
+        const page = await pr.text();
+        if (!/MESOSCALE DISCUSSION/i.test(page)) continue;
+        const preM = page.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+        if (!preM) continue;
+        const parsed = parseMdFull(decodeEntities(preM[1]));
         if (!parsed.concerning && !parsed.summary) continue;
-        let line = "The Storm Prediction Center just issued mesoscale discussion " + parseInt(num, 10) + ". ";
-        if (parsed.concerning) line += "Concerning: " + parsed.concerning + ". ";
-        if (parsed.summary) line += parsed.summary;
-        queueSpeech(line.trim(), 70);
+        // Headline: what it's concerning, where, and the watch odds.
+        let head = "The Storm Prediction Center just issued mesoscale discussion " + parseInt(num, 10) + ". ";
+        if (parsed.concerning) head += "Concerning " + parsed.concerning + ". ";
+        if (parsed.areas) head += "Areas affected: " + parsed.areas + ". ";
+        if (parsed.prob) head += "Probability of a watch being issued: " + parsed.prob + ". ";
+        if (parsed.gust) head += "Most probable peak wind gust: " + parsed.gust + ". ";
+        queueSpeech(head.trim(), 70);
+        // Then the forecaster's full write-up, in chunks.
+        const body = [parsed.summary, parsed.discussion].filter(Boolean).join(" ");
+        for (const chunk of chunkText(body, 550)) queueSpeech(chunk, 70);
       } catch (e2) {}
     }
   } catch (e) {}
@@ -2789,15 +3001,28 @@ function reportRoadLine(type, remark, city) {
 
 function onNewStormReport(f) {
   const p = f.properties || {};
-  const type = p.type || "weather";
+  const type = lsrTypeName(p);
   const city = p.city || "";
+  const county = p.county || "";
   const state = expandStates(p.state || "");
   const source = p.source || "a spotter";
-  const mag = p.magnitude ? ", " + p.magnitude : "";
+  let mag = "";
+  if (p.magnitude) {
+    mag = ", " + p.magnitude;
+    if (/hail/.test(type)) mag += (parseFloat(p.magnitude) === 1 ? " inch" : " inches");
+    else if (/wind|gust/.test(type)) mag += " mile an hour";
+  }
   const remark = p.remark ? " " + p.remark : "";
   let text = nextOpener() + " " + nextVibe() + " " + type + mag +
-    (city ? " over in " + city : "") + (state ? ", " + state : "") +
-    ". ";
+    (city ? " over in " + city : "") +
+    (county ? ", " + county + " County" : "") +
+    (state ? ", " + state : "") + ". ";
+  // How far it is from the listener — the detail that makes it real.
+  const plat = parseFloat(p.lat), plon = parseFloat(p.lon);
+  if (userLoc && isFinite(plat) && isFinite(plon)) {
+    text += "That's about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, plat, plon)) +
+      " miles " + compassDir(userLoc.lat, userLoc.lon, plat, plon) + " of you. ";
+  }
   const srcLine = reportSourceLine(source);
   text += srcLine ? srcLine + " this one." : "This one's from " + source + ".";
   if (remark) text += remark;
@@ -2847,7 +3072,7 @@ function onNewAlert(f) {
   const c = alertCentroid(f);
   const move = c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null;
   const why = whyThisAirs(p);
-  const text = (why ? why + " " : "") + buildAnnouncement(p);
+  const text = (why ? why + " " : "") + buildAnnouncement(p, f);
   const evLow = (p.event || "").toLowerCase();
   const descLow = (p.description || "").toLowerCase();
   const isEmergency = /tornado/i.test(p.event || "") ||
@@ -2878,7 +3103,7 @@ function renderMarkers() {
     }).addTo(map);
     m.bindTooltip(p.event || "Alert", { permanent: false });
     m.on("click", () => {
-      presenter.urgent(buildAnnouncement(p), { lat: c.lat, lon: c.lon, zoom: 8 });
+      presenter.urgent(buildAnnouncement(p, f), { lat: c.lat, lon: c.lon, zoom: 8 });
     });
     alertMarkers[f.id] = m;
   }
@@ -2904,7 +3129,7 @@ function renderAlertsList() {
       "<small>" + escapeHtml(p.headline || "") + "</small>";
     b.addEventListener("click", () => {
       const c = alertCentroid(f);
-      presenter.urgent(buildAnnouncement(p), c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
+      presenter.urgent(buildAnnouncement(p, f), c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
       const desc = p.description || "";
       const instr = p.instruction || "";
       if (desc || instr) queueSpeech("Details. " + (desc + " " + instr).slice(0, 900), 998);
