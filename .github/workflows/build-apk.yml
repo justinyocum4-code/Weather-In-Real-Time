@@ -34,6 +34,24 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Inject TomTom key (if the TOMTOM_KEY repo secret is set)
+        env:
+          TOMTOM_KEY: ${{ secrets.TOMTOM_KEY }}
+        run: |
+          if [ -n "$TOMTOM_KEY" ]; then
+            python3 - "$TOMTOM_KEY" <<'PYEOF'
+          import sys
+          key = sys.argv[1]
+          p = "index.html"
+          s = open(p).read()
+          assert "%%TOMTOM_KEY%%" in s, "TomTom key placeholder missing from index.html"
+          open(p, "w").write(s.replace("%%TOMTOM_KEY%%", key))
+          print("TomTom key injected into index.html.")
+          PYEOF
+          else
+            echo "No TOMTOM_KEY secret set; the traffic layer stays silent."
+          fi
+
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
