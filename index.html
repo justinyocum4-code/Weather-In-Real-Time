@@ -733,7 +733,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     background: linear-gradient(transparent, rgba(0,0,0,.9)); flex-wrap: wrap; }
   #controls button { background: var(--black); color: var(--gold); border: 2px solid var(--gold);
     border-radius: 12px; padding: 14px 20px; font-size: 17px; font-weight: bold; min-height: 56px; }
-  #controls button:focus, #controls button:hover { background: var(--gold); color: #111; outline: 3px solid #fff; }
+  #controls button:focus, #controls button:hover { background: var(--gold); color: #111; outline: 5px solid #fff; box-shadow: 0 0 0 8px rgba(255,215,0,.35); }
   #controls button[aria-pressed="true"] { background: var(--gold); color: #111; }
   /* Panels */
   .panel { position: absolute; z-index: 20; left: 0; right: 0; bottom: 0; max-height: 70%;
@@ -743,7 +743,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .panel button.big { display: block; width: 100%; margin: 8px 0; background: var(--black);
     color: var(--gold); border: 2px solid var(--gold); border-radius: 10px;
     padding: 14px; font-size: 17px; font-weight: bold; text-align: left; }
-  .panel button.big:focus { background: var(--gold); color: #111; outline: 3px solid #fff; }
+  .panel button.big:focus { background: var(--gold); color: #111; outline: 5px solid #fff; box-shadow: 0 0 0 8px rgba(255,215,0,.35); }
+  #national-list h3 { color: var(--gold); margin: 20px 0 8px 0; font-size: 20px;
+    border-bottom: 1px solid #444; padding-bottom: 6px; }
+  #national-list h3:first-child { margin-top: 0; }
+  /* TV side drawer (opens with the D-pad left arrow) */
+  #side-drawer { position: absolute; z-index: 30; top: 0; bottom: 0; left: 0;
+    width: min(400px, 72%); background: #0a0a0a; border-right: 3px solid var(--gold);
+    padding: 20px 16px; overflow-y: auto; transform: translateX(-110%);
+    transition: transform .28s ease-out; }
+  #side-drawer.open { transform: translateX(0); }
+  #side-drawer h2 { color: var(--gold); margin: 0 0 16px 0; font-size: 24px; }
+  #side-drawer button.menu-item { display: block; width: 100%; margin: 10px 0;
+    background: var(--black); color: var(--gold); border: 2px solid var(--gold);
+    border-radius: 10px; padding: 16px; font-size: 19px; font-weight: bold;
+    text-align: left; min-height: 64px; }
+  #side-drawer button.menu-item:focus, #side-drawer button.menu-item:hover {
+    background: var(--gold); color: #111; outline: 5px solid #fff; box-shadow: 0 0 0 8px rgba(255,215,0,.35); }
+  #side-drawer button.menu-item.close-btn { margin-top: 24px; border-color: #888; color: #ccc; }
   .alert-item small { display: block; color: #ccc; font-weight: normal; font-size: 14px; margin-top: 4px; }
   .sev-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; }
   /* Welcome overlay */
@@ -753,6 +770,20 @@ svg.leaflet-image-layer.leaflet-interactive path {
     border: 2px solid var(--gold); background: var(--black); color: var(--gold);
     font-size: 16px; font-weight: bold; }
   .setting-row button.toggle[aria-pressed="true"] { background: var(--gold); color: #111; }
+  .setting-row button.toggle:focus { outline: 5px solid #fff; box-shadow: 0 0 0 8px rgba(255,215,0,.35); }
+  /* TV mode: bigger text and touch targets for couch distance */
+  body.tv-mode #top-bar h1 { font-size: 30px; }
+  body.tv-mode #top-bar { font-size: 22px; padding: 16px; }
+  body.tv-mode #controls { gap: 14px; padding: 18px; }
+  body.tv-mode #controls button { font-size: 22px; padding: 20px 28px; min-height: 76px; }
+  body.tv-mode .panel { padding: 24px; }
+  body.tv-mode .panel h2 { font-size: 30px; }
+  body.tv-mode .panel button.big { font-size: 22px; padding: 20px; }
+  body.tv-mode .setting-row { font-size: 22px; padding: 16px 4px; }
+  body.tv-mode .setting-row button.toggle { font-size: 20px; padding: 14px; min-width: 120px; }
+  body.tv-mode #side-drawer { width: min(480px, 82%); padding: 28px 20px; }
+  body.tv-mode #side-drawer h2 { font-size: 32px; }
+  body.tv-mode #side-drawer button.menu-item { font-size: 24px; padding: 22px; min-height: 84px; }
 </style>
 </head>
 <body>
@@ -781,6 +812,12 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div class="close-row"><button type="button" class="big" id="btn-close-alerts" style="width:auto;display:inline-block;">Close</button></div>
     <h2>Active weather alerts</h2>
     <div id="alerts-list"></div>
+  </div>
+
+  <div id="national-panel" class="panel" hidden>
+    <div class="close-row"><button type="button" class="big" id="btn-close-national" style="width:auto;display:inline-block;">Close</button></div>
+    <h2>National weather</h2>
+    <div id="national-list"></div>
   </div>
 
   <div id="settings-panel" class="panel" hidden>
@@ -814,15 +851,31 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Background music</span>
       <button type="button" class="toggle" id="tgl-music" aria-pressed="true">On</button>
     </div>
+    <div class="setting-row">
+      <span>TV mode (large text and buttons)</span>
+      <button type="button" class="toggle" id="tgl-tvmode" aria-pressed="false">Off</button>
+    </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
+
+  <nav id="side-drawer" aria-label="Menu" aria-hidden="true">
+    <h2>Menu</h2>
+    <button type="button" class="menu-item" id="drawer-national">National weather</button>
+    <button type="button" class="menu-item" id="drawer-myarea">My area</button>
+    <button type="button" class="menu-item" id="drawer-alerts">Alerts</button>
+    <button type="button" class="menu-item" id="drawer-recap">Recap</button>
+    <button type="button" class="menu-item" id="drawer-repeat">Repeat last</button>
+    <button type="button" class="menu-item" id="drawer-mute">Mute voice</button>
+    <button type="button" class="menu-item" id="drawer-settings">Settings</button>
+    <button type="button" class="menu-item close-btn" id="drawer-close">Close menu</button>
+  </nav>
 </div>
 
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.4.0";
-const WRT_VERSION_CODE = 50;
+const WRT_VERSION = "3.5.0";
+const WRT_VERSION_CODE = 51;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -2593,6 +2646,7 @@ async function pollStormReports() {
     const data = await r.json();
     const feats = data.features || [];
     currentLsrs = feats;
+    renderNational();
     drawStormReportIcons(feats);
     for (const f of feats) {
       const p = f.properties || {};
@@ -2987,6 +3041,7 @@ function processAlerts(features) {
   }
   renderAlertsList();
   renderMarkers();
+  renderNational();
 }
 
 function onNewAlert(f) {
@@ -3067,10 +3122,117 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* ============ National weather panel ============
+   Watches, warnings, advisories, and storm reports for the whole country,
+   grouped like the old weather app's national section. */
+function speakAlertItem(f) {
+  const p = f.properties || {};
+  const c = alertCentroid(f);
+  presenter.urgent(buildAnnouncement(p, f), c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null);
+  const desc = p.description || "";
+  const instr = p.instruction || "";
+  if (desc || instr) queueSpeech("Details. " + (desc + " " + instr).slice(0, 900), 998);
+  showPanel(null);
+}
+function nationalAlertButton(f) {
+  const p = f.properties || {};
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "big alert-item";
+  b.innerHTML = '<span class="sev-dot" style="background:' + severityColor(p) + '"></span>' +
+    escapeHtml(p.event || "Alert") +
+    "<small>" + escapeHtml(p.areaDesc || "") + "</small>" +
+    "<small>" + escapeHtml(p.headline || "") + "</small>";
+  b.addEventListener("click", () => speakAlertItem(f));
+  return b;
+}
+function countWarningsWatches() {
+  let warnings = 0, watches = 0;
+  for (const f of (currentFeatures || [])) {
+    const ev = String((((f || {}).properties) || {}).event || "");
+    if (/warning/i.test(ev)) warnings++;
+    else if (/watch/i.test(ev)) watches++;
+  }
+  return { warnings, watches };
+}
+function renderNational() {
+  const list = document.getElementById("national-list");
+  if (!list) return;
+  list.innerHTML = "";
+  const warns = [], watches = [], advis = [], other = [];
+  for (const f of (currentFeatures || [])) {
+    const ev = String((((f || {}).properties) || {}).event || "");
+    if (/warning/i.test(ev)) warns.push(f);
+    else if (/watch/i.test(ev)) watches.push(f);
+    else if (/advisory|statement/i.test(ev)) advis.push(f);
+    else other.push(f);
+  }
+  const addSection = (title, items) => {
+    const h = document.createElement("h3");
+    h.textContent = title + " (" + items.length + ")";
+    list.appendChild(h);
+    if (!items.length) {
+      const p = document.createElement("p");
+      p.style.color = "#999";
+      p.textContent = "None right now.";
+      list.appendChild(p);
+      return;
+    }
+    const sorted = [...items].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
+    for (const f of sorted.slice(0, 25)) list.appendChild(nationalAlertButton(f));
+  };
+  addSection("Warnings", warns);
+  addSection("Watches", watches);
+  addSection("Advisories", advis);
+  if (other.length) addSection("Other alerts", other);
+  const rh = document.createElement("h3");
+  const lsrs = currentLsrs || [];
+  rh.textContent = "Storm reports (" + lsrs.length + ")";
+  list.appendChild(rh);
+  if (!lsrs.length) {
+    const p = document.createElement("p");
+    p.style.color = "#999";
+    p.textContent = "No storm reports right now.";
+    list.appendChild(p);
+    return;
+  }
+  for (const f of lsrs.slice(0, 25)) {
+    const p = f.properties || {};
+    const type = lsrTypeName(p);
+    let mag = "";
+    if (p.magnitude) {
+      mag = ", " + p.magnitude;
+      if (/hail/.test(type)) mag += (parseFloat(p.magnitude) === 1 ? " inch" : " inches");
+      else if (/wind|gust/.test(type)) mag += " mile an hour";
+    }
+    const where = [p.city, p.county ? p.county + " County" : "", expandStates(p.state || "")]
+      .filter(Boolean).join(", ");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "big alert-item";
+    b.innerHTML = '<span class="sev-dot" style="background:#4da3ff"></span>' +
+      escapeHtml(type + mag) +
+      "<small>" + escapeHtml(where || "Location unknown") + "</small>" +
+      "<small>Reported by " + escapeHtml(p.source || "a spotter") + "</small>";
+    b.addEventListener("click", () => {
+      queueSpeech("Storm report. " + type + mag + (where ? ", " + where : "") +
+        ". Reported by " + (p.source || "a spotter") + ".", 999);
+      if (p.remark) queueSpeech("Remark. " + p.remark, 998);
+      showPanel(null);
+    });
+    list.appendChild(b);
+  }
+}
+
 /* ============ UI wiring ============ */
+const PANEL_IDS = ["alerts-panel", "settings-panel", "national-panel"];
 function showPanel(id) {
-  document.getElementById("alerts-panel").hidden = id !== "alerts-panel";
-  document.getElementById("settings-panel").hidden = id !== "settings-panel";
+  for (const pid of PANEL_IDS) document.getElementById(pid).hidden = pid !== id;
+  if (id === "national-panel") renderNational();
+  syncUiOpen();
+}
+function anyPanelOpen() {
+  return PANEL_IDS.some((pid) => !document.getElementById(pid).hidden);
 }
 
 document.getElementById("btn-repeat").addEventListener("click", repeatLast);
@@ -3099,21 +3261,111 @@ document.getElementById("btn-myarea").addEventListener("click", () => {
 });
 
 document.getElementById("btn-alerts").addEventListener("click", () => {
+  panelFromDrawer = false;
   renderAlertsList();
   showPanel("alerts-panel");
   document.getElementById("btn-close-alerts").focus();
 });
 document.getElementById("btn-close-alerts").addEventListener("click", () => {
   document.getElementById("alerts-panel").hidden = true;
+  syncUiOpen();
 });
 
 document.getElementById("btn-settings").addEventListener("click", () => {
+  panelFromDrawer = false;
   showPanel("settings-panel");
   document.getElementById("btn-close-settings").focus();
 });
 document.getElementById("btn-close-settings").addEventListener("click", () => {
   document.getElementById("settings-panel").hidden = true;
+  syncUiOpen();
 });
+
+/* TV side drawer: D-pad left opens it, left/right/back closes it. */
+function drawerOpen() {
+  return document.getElementById("side-drawer").classList.contains("open");
+}
+function openDrawer(announce) {
+  var d = document.getElementById("side-drawer");
+  d.classList.add("open");
+  d.setAttribute("aria-hidden", "false");
+  syncUiOpen();
+  if (announce !== false) {
+    queueSpeech("Menu opened. Use the up and down buttons to move, the select button to choose.", 60);
+  }
+  document.getElementById("drawer-national").focus();
+}
+function closeDrawer() {
+  var d = document.getElementById("side-drawer");
+  d.classList.remove("open");
+  d.setAttribute("aria-hidden", "true");
+  syncUiOpen();
+}
+var DRAWER_ACTIONS = {
+  "drawer-myarea": "btn-myarea",
+  "drawer-alerts": "btn-alerts",
+  "drawer-recap": "btn-recap",
+  "drawer-repeat": "btn-repeat",
+  "drawer-mute": "btn-mute",
+  "drawer-settings": "btn-settings"
+};
+Object.keys(DRAWER_ACTIONS).forEach(function (drawerId) {
+  document.getElementById(drawerId).addEventListener("click", function () {
+    closeDrawer();
+    document.getElementById(DRAWER_ACTIONS[drawerId]).click();
+    // Set AFTER the underlying click: the toolbar handlers clear this flag.
+    if (drawerId === "drawer-alerts" || drawerId === "drawer-settings") panelFromDrawer = true;
+    syncUiOpen();
+  });
+});
+document.getElementById("drawer-close").addEventListener("click", function () {
+  closeDrawer();
+  queueSpeech("Menu closed.", 60);
+});
+document.getElementById("drawer-national").addEventListener("click", function () {
+  closeDrawer();
+  panelFromDrawer = true;
+  renderNational();
+  showPanel("national-panel");
+  const c = countWarningsWatches();
+  const n = (currentLsrs || []).length;
+  queueSpeech("National weather. " + c.warnings + " warnings, " + c.watches +
+    " watches, " + n + " storm reports.", 999);
+  document.getElementById("btn-close-national").focus();
+});
+document.getElementById("btn-close-national").addEventListener("click", () => {
+  showPanel(null);
+});
+window.addEventListener("keydown", function (e) {
+  var k = e.key || "";
+  var kc = e.keyCode || 0;
+  var left = (k === "ArrowLeft" || kc === 21);
+  var right = (k === "ArrowRight" || kc === 22);
+  var back = (k === "Escape" || k === "GoBack" || kc === 4);
+  if (drawerOpen()) {
+    if (left || right || back) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDrawer();
+    }
+    return; // up/down/select handled natively by focus
+  }
+  if (left) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (anyPanelOpen()) {
+      showPanel(null);
+    } else {
+      openDrawer();
+    }
+  } else if (back) {
+    if (anyPanelOpen() || drawerOpen()) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.__wrtCloseUi();
+    }
+  }
+}, true);
 document.getElementById("btn-recap").addEventListener("click", () => {
   recapAlerts();
 });
@@ -3163,6 +3415,50 @@ document.getElementById("tgl-music").addEventListener("click", () => {
     stopMusic();
   }
 });
+
+/* TV mode: large text and buttons for couch distance. */
+function tvMode() { return store.get("tv_mode", "0") === "1"; }
+function applyTvMode() {
+  document.body.classList.toggle("tv-mode", tvMode());
+  const t = document.getElementById("tgl-tvmode");
+  t.setAttribute("aria-pressed", String(tvMode()));
+  t.textContent = tvMode() ? "On" : "Off";
+}
+document.getElementById("tgl-tvmode").addEventListener("click", () => {
+  const on = !tvMode();
+  store.set("tv_mode", on ? "1" : "0");
+  applyTvMode();
+  queueSpeech(on ? "TV mode on. Text and buttons are larger." : "TV mode off.", 999);
+});
+applyTvMode();
+
+/* Native back-button handshake: the app tells Android whether a menu or
+   panel is open (via the store, which the native side can read), and the
+   native back handler asks us to close it before ever exiting. */
+function uiIsOpen() {
+  return drawerOpen() || anyPanelOpen();
+}
+function syncUiOpen() {
+  try { store.set("wrt_ui_open", uiIsOpen() ? "1" : "0"); } catch (err) {}
+}
+let panelFromDrawer = false; // true when the open panel was reached through the side menu
+window.__wrtCloseUi = function () {
+  // Back button: walk back out. A panel opened from the menu returns to the
+  // menu; the menu itself (or a panel opened elsewhere) just closes.
+  const hadPanel = anyPanelOpen();
+  const fromDrawer = panelFromDrawer;
+  panelFromDrawer = false;
+  closeDrawer();
+  showPanel(null);
+  syncUiOpen();
+  if (hadPanel && fromDrawer) {
+    openDrawer(false);
+    queueSpeech("Back to menu.", 60);
+  } else if (!hadPanel && !drawerOpen()) {
+    queueSpeech("Closed.", 60);
+  }
+};
+syncUiOpen();
 
 function syncQuietToggle() {
   const on = store.get("quiet", "1") === "1";
