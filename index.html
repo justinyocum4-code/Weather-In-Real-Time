@@ -874,8 +874,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.5.0";
-const WRT_VERSION_CODE = 51;
+const WRT_VERSION = "3.6.0";
+const WRT_VERSION_CODE = 52;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1573,7 +1573,7 @@ function startIdleDrift() {
 /* Tour: when the presenter runs dry, feed it the next most important alert.
    The radar flies there first, then the full warning is narrated — the voice
    always describes exactly what the radar is showing. */
-let tourIndex = 0;
+let tourIndex = 0, nearTourIndex = 0;
 function scheduleTourNext() {
   if (presenter.busy || presenter.queue.length) return;
   if (!map || !currentFeatures.length) return;
@@ -1583,8 +1583,27 @@ function scheduleTourNext() {
       .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
       .slice(0, 12);
     if (!feats.length) return;
-    const f = feats[tourIndex % feats.length];
-    tourIndex++;
+    // A storm within 25 miles of the listener owns the tour: stay on it
+    // instead of wandering the country.
+    let f = feats[tourIndex % feats.length];
+    let zoom = 7, intro = "";
+    if (userLoc) {
+      const near = feats
+        .map(x => ({ x, c: alertCentroid(x) }))
+        .filter(o => o.c && distanceMiles(userLoc.lat, userLoc.lon, o.c.lat, o.c.lon) <= 25)
+        .sort((a, b) => distanceMiles(userLoc.lat, userLoc.lon, a.c.lat, a.c.lon) -
+                        distanceMiles(userLoc.lat, userLoc.lon, b.c.lat, b.c.lon));
+      if (near.length) {
+        f = near[nearTourIndex % near.length].x;
+        nearTourIndex++;
+        zoom = 8;
+        intro = "Keeping eyes on this one near you. ";
+      } else {
+        tourIndex++;
+      }
+    } else {
+      tourIndex++;
+    }
     const tp = f.properties || {};
     const c = alertCentroid(f);
     // Threat banner follows the tour — like YallBot's stream title.
@@ -1596,7 +1615,7 @@ function scheduleTourNext() {
         banner.style.display = "block";
       }
     } catch (e) {}
-    presenter.add(buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null, 60);
+    presenter.add(intro + buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom } : null, 60);
   } catch (e) {}
 }
 
@@ -2132,6 +2151,26 @@ function extractStatementSummary(desc) {
   return first ? first.slice(0, 300) + "." : null;
 }
 
+/* NWS text writes times like "300 PM" or "3:00" — device voices read those as
+   "three hundred". Normalize every spoken time into words a voice says right:
+   "300 PM" -> "3 PM", "145 PM" -> "1:45 PM", "1200 PM" -> "noon",
+   "3:00 PM" -> "3 PM", bare "3:00" -> "3 o'clock". */
+function fixSpokenTimes(text) {
+  if (!text) return text;
+  text = text.replace(/\b(\d{3,4})\s*([AP])\.?\s*M\.?\b/gi, (m, digits, ap) => {
+    const n = parseInt(digits, 10);
+    const upper = ap.toUpperCase() + "M";
+    if (n === 1200) return upper === "PM" ? "noon" : "midnight";
+    if (n < 100 || n % 100 >= 60) return m; // not a real time, leave it
+    const h24 = Math.floor(n / 100), mm = n % 100;
+    const h12 = ((h24 + 11) % 12) + 1;
+    return mm === 0 ? h12 + " " + upper : h12 + ":" + String(mm).padStart(2, "0") + " " + upper;
+  });
+  text = text.replace(/\b(\d{1,2}):00\s*([AP])\.?\s*M\.?\b/gi, (m, h, ap) => h + " " + ap.toUpperCase() + "M");
+  text = text.replace(/\b(\d{1,2}):00\b/g, (m, h) => h + " o'clock");
+  return text;
+}
+
 function buildAnnouncement(p, f) {
   const event = p.event || "Weather alert";
   const ev = event.toLowerCase();
@@ -2191,7 +2230,7 @@ function buildAnnouncement(p, f) {
     if (impacts) text += " They're reporting " + impacts;
   }
   if (text.length > 650) text = text.slice(0, 650) + ".";
-  return text;
+  return fixSpokenTimes(text);
 }
 
 /* Hazards from a severe thunderstorm description, in folksy units. */
@@ -2369,6 +2408,24 @@ function extractRoads(desc) {
 /* One rich detail sentence for a warning: where the storm is, how fast it's
    moving, what cities it's tracking toward, how far it is from you, and any
    highways named in the warning. */
+/* True initial bearing, in degrees, from point 1 to point 2. */
+function stormBearing(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const dLon = (lon2 - lon1) * r;
+  const y = Math.sin(dLon) * Math.cos(lat2 * r);
+  const x = Math.cos(lat1 * r) * Math.sin(lat2 * r) -
+            Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos(dLon);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+
+/* Is this storm's motion vector pointed at the listener (within 45°)? */
+function isHeadedTowardUser(sm) {
+  if (!userLoc || sm.lat == null || sm.lon == null || sm.dirDeg == null) return false;
+  const brg = stormBearing(sm.lat, sm.lon, userLoc.lat, userLoc.lon);
+  const diff = Math.abs(((sm.dirDeg - brg + 540) % 360) - 180);
+  return diff < 45;
+}
+
 function stormDetail(desc, f) {
   const c = alertCentroid(f);
   const sm = parseStormMotion(desc, c);
@@ -2386,6 +2443,7 @@ function stormDetail(desc, f) {
     bits.push("about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, sm.lat, sm.lon)) +
       " miles " + compassDir(userLoc.lat, userLoc.lon, sm.lat, sm.lon) + " of you");
   }
+  if (isHeadedTowardUser(sm)) bits.push("and it's headed your way");
   const roads = extractRoads(desc);
   if (roads) bits.push("near " + roads);
   return bits.length ? bits.join(", ") + "." : null;
