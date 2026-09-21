@@ -821,8 +821,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.3.1";
-const WRT_VERSION_CODE = 49;
+const WRT_VERSION = "3.4.0";
+const WRT_VERSION_CODE = 50;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -988,7 +988,7 @@ const presenter = {
       try {
         map.once("moveend", arrived);
         smoothPan(item.move.lat, item.move.lon, item.move.zoom || 7);
-        setTimeout(arrived, 6000); // fallback if moveend never fires
+        setTimeout(arrived, 9000); // fallback if moveend never fires (glides run up to 6s)
       } catch (e) { arrived(); }
     } else {
       doSpeak();
@@ -1445,21 +1445,24 @@ function smoothPan(lat, lon, zoom) {
   if (!map) return;
   try {
     pauseDrift(2); // let the alert move finish before the drift resumes
-    stopRadarAnim();
     if (panResumeTimer) { clearTimeout(panResumeTimer); panResumeTimer = null; }
-    for (const l of radarLayers) { try { l.setOpacity(0.18); } catch (e) {} }
-    map.panTo([lat, lon], { animate: true, duration: 2.2, easeLinearity: 0.1 });
-    const needZoom = zoom && map.getZoom() !== zoom;
-    panResumeTimer = setTimeout(() => {
-      try { if (needZoom) map.setZoom(zoom, { animate: true }); } catch (e) {}
+    const from = map.getCenter();
+    const dist = distanceMiles(from.lat, from.lng, lat, lon);
+    // One glide, scaled to the hop: state-to-state jumps get a slow smooth
+    // slide instead of a whip-pan, short hops stay snappy. No radar dimming
+    // mid-move — the dim/restore flicker was part of the jerkiness.
+    // The radar loop keeps playing straight through the glide.
+    const dur = Math.min(6, Math.max(2.5, 1.5 + dist / 350));
+    map.panTo([lat, lon], { animate: true, duration: dur, easeLinearity: 0.35 });
+    const targetZoom = zoom || map.getZoom();
+    if (targetZoom !== map.getZoom()) {
+      // Ease the zoom in gently after the glide lands, instead of punching
+      // it right as the pan finishes — that two-step was the visible hitch.
       panResumeTimer = setTimeout(() => {
-        if (radarLayers.length) {
-          try { radarLayers[radarFrameIndex].setOpacity(0.85); } catch (e) {}
-          startRadarAnim();
-        }
+        try { map.setZoom(targetZoom, { animate: true }); } catch (e) {}
         panResumeTimer = null;
-      }, needZoom ? 900 : 150);
-    }, needZoom ? 2400 : 2350);
+      }, dur * 1000 + 400);
+    }
   } catch (e) {
     try { map.setView([lat, lon], zoom || map.getZoom()); } catch (e2) {}
   }
@@ -1575,6 +1578,28 @@ function alertCentroid(feature) {
     }
   }
   return stateCentroidFromArea(p.areaDesc);
+}
+
+/* Texas boundary (simplified, lon/lat) — Justin only wants storm distances
+   for storms in his home state. Ray-cast point-in-polygon. */
+const TEXAS_POLY = [
+  [-106.55,31.75],[-105.30,30.60],[-104.50,29.80],[-103.50,29.05],
+  [-102.80,29.05],[-101.50,29.60],[-100.90,29.37],[-100.00,28.50],
+  [-99.20,27.50],[-98.00,26.50],[-97.48,25.84],[-97.20,26.50],
+  [-96.40,28.00],[-95.00,29.30],[-93.90,29.70],[-93.75,30.50],
+  [-94.05,33.02],[-96.00,33.90],[-98.00,34.20],[-100.00,34.58],
+  [-100.00,36.50],[-103.00,36.50],[-103.00,32.00],[-106.55,32.00]
+];
+function isTexasPoint(lat, lon) {
+  if (!isFinite(lat) || !isFinite(lon)) return false;
+  let inside = false;
+  for (let i = 0, j = TEXAS_POLY.length - 1; i < TEXAS_POLY.length; j = i++) {
+    const xi = TEXAS_POLY[i][0], yi = TEXAS_POLY[i][1];
+    const xj = TEXAS_POLY[j][0], yj = TEXAS_POLY[j][1];
+    if (((yi > lat) !== (yj > lat)) &&
+        (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
 }
 
 function distanceMiles(lat1, lon1, lat2, lon2) {
@@ -2039,6 +2064,21 @@ const nextTake = cycler([
   "Strong opinion: sunshine before 7 AM doesn't count. I said what I said.",
 ]);
 
+/* Special Weather Statements carry their message in "* WHAT... / * IMPACTS..."
+   blocks. Read the actual statement instead of just the county and state. */
+function extractStatementSummary(desc) {
+  if (!desc) return null;
+  const clean = (s) => s.replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  const bits = [];
+  const what = desc.match(/\*\s*WHAT\.{0,3}\s*([^\n*]+)/i);
+  const impacts = desc.match(/\*\s*IMPACTS?\.{0,3}\s*([^\n*]+)/i);
+  if (what && clean(what[1])) bits.push(clean(what[1]));
+  if (impacts && clean(impacts[1])) bits.push(clean(impacts[1]));
+  if (bits.length) return bits.join(". ") + ".";
+  const first = clean(desc).split(". ")[0];
+  return first ? first.slice(0, 300) + "." : null;
+}
+
 function buildAnnouncement(p, f) {
   const event = p.event || "Weather alert";
   const ev = event.toLowerCase();
@@ -2082,6 +2122,12 @@ function buildAnnouncement(p, f) {
   } else if (/severe thunderstorm watch/i.test(ev)) {
     text = "Severe thunderstorm watch" + (area ? " for " + area : "") + (exp ? " " + exp : "") +
            ". Storms are firing up nearby. Keep an eye up, y'all.";
+  } else if (/special weather statement/i.test(ev)) {
+    // Read what the statement actually says — not just the county and state.
+    text = nextOpener() + " special weather statement" + (area ? ", covering " + area : "") +
+           (exp ? ", " + exp : "") + ".";
+    const summary = extractStatementSummary(desc);
+    if (summary) text += " " + summary;
   } else {
     // Everything else: conversational but structured.
     text = nextOpener() + " " + event.toLowerCase() + (area ? ", covering " + area : "") +
@@ -2281,7 +2327,9 @@ function stormDetail(desc, f) {
     const ahead = citiesInPath(sm.lat, sm.lon, sm.dirDeg);
     if (ahead.length) bits.push("tracking toward " + ahead.join(" and "));
   }
-  if (userLoc && sm.lat != null) {
+  // Storm distance is Texas-only: Justin doesn't want mileage on storms
+  // in other states.
+  if (userLoc && sm.lat != null && isTexasPoint(sm.lat, sm.lon)) {
     bits.push("about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, sm.lat, sm.lon)) +
       " miles " + compassDir(userLoc.lat, userLoc.lon, sm.lat, sm.lon) + " of you");
   }
@@ -2894,7 +2942,8 @@ function onNewStormReport(f) {
     (state ? ", " + state : "") + ". ";
   // How far it is from the listener — the detail that makes it real.
   const plat = parseFloat(p.lat), plon = parseFloat(p.lon);
-  if (userLoc && isFinite(plat) && isFinite(plon)) {
+  // Texas-only: no mileage on reports from other states.
+  if (userLoc && isFinite(plat) && isFinite(plon) && isTexasPoint(plat, plon)) {
     text += "That's about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, plat, plon)) +
       " miles " + compassDir(userLoc.lat, userLoc.lon, plat, plon) + " of you. ";
   }
