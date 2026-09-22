@@ -856,12 +856,27 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <select id="voice-select" aria-label="Choose voice" style="max-width:60%;font-size:15px;padding:10px;border-radius:10px;border:2px solid var(--gold);background:#0a0a0a;color:var(--gold);font-weight:bold;"></select>
     </div>
     <div class="setting-row">
+      <span>Step through voices (TV remote friendly)</span>
+      <span>
+        <button type="button" class="toggle" id="btn-voice-prev" style="min-width:90px;">&#9664; Prev</button>
+        <button type="button" class="toggle" id="btn-voice-next" style="min-width:90px;">Next &#9654;</button>
+      </span>
+    </div>
+    <div class="setting-row">
       <span>Background music</span>
       <button type="button" class="toggle" id="tgl-music" aria-pressed="true">On</button>
     </div>
     <div class="setting-row">
       <span>TV mode (large text and buttons)</span>
       <button type="button" class="toggle" id="tgl-tvmode" aria-pressed="false">Off</button>
+    </div>
+    <div class="setting-row">
+      <span>App updates</span>
+      <button type="button" class="toggle" id="btn-check-update" style="min-width:140px;">Check for updates</button>
+    </div>
+    <div class="setting-row">
+      <span id="update-status">You're on the latest version.</span>
+      <button type="button" class="toggle" id="btn-install-update" style="min-width:140px;" hidden>Download &amp; install</button>
     </div>
     <p style="color:#999;font-size:14px;">Version <span id="app-version">1.0</span> — alerts by the National Weather Service, radar by the Iowa Environmental Mesonet (NOAA NEXRAD).</p>
   </div>
@@ -882,8 +897,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.7.0";
-const WRT_VERSION_CODE = 53;
+const WRT_VERSION = "3.8.0";
+const WRT_VERSION_CODE = 55;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1442,6 +1457,10 @@ async function loadRadar() {
     for (const s of steps) {
       newLayers.push(L.tileLayer(base + s + "/{z}/{x}/{y}.png?t=" + epochMin, {
         opacity: 0, zIndex: 10, className: "radar-frame",
+        // Prefetch a wide ring of tiles around the viewport and keep loading
+        // them mid-pan, so the radar keeps up when the tour glides to the
+        // next stop instead of arriving to gray tiles on slower TV hardware.
+        keepBuffer: 5, updateWhenIdle: false,
         attribution: "Radar: Iowa Environmental Mesonet / NOAA NEXRAD"
       }));
     }
@@ -1455,7 +1474,7 @@ async function loadRadar() {
       const frames = past.slice(-8);
       for (const f of frames) {
         const url = "https://tilecache.rainviewer.com" + f.path + "/256/{z}/{x}/{y}/5/1_1.png"; // 5 = NEXRAD Level III palette
-        newLayers.push(L.tileLayer(url, { opacity: 0, zIndex: 10, className: "radar-frame" }));
+        newLayers.push(L.tileLayer(url, { opacity: 0, zIndex: 10, className: "radar-frame", keepBuffer: 5, updateWhenIdle: false }));
       }
     } catch (e) { return; }
   }
@@ -1489,6 +1508,22 @@ function radarAnimTick() {
   radarFrameIndex = (radarFrameIndex + 1) % radarLayers.length;
   try { radarLayers[radarFrameIndex].setOpacity(0.85); } catch (e) {}
 }
+/* While the camera glides to a new tour stop, park the radar on the newest
+   frame instead of animating all 8: that cuts tile traffic 8x mid-move, so
+   the new area's tiles finish loading before the narration starts and the
+   radar no longer lags behind the tour on slower TV hardware. */
+let radarMoveResumeTimer = null;
+function holdRadarForMove() {
+  try {
+    stopRadarAnim();
+    radarFrameIndex = 0;
+    radarLayers.forEach((l, i) => { try { l.setOpacity(i === 0 ? 0.85 : 0); } catch (e) {} });
+  } catch (e) {}
+}
+function releaseRadarAfterMove() {
+  if (radarMoveResumeTimer) { clearTimeout(radarMoveResumeTimer); radarMoveResumeTimer = null; }
+  try { if (!radarAnimTimer && radarLayers.length) startRadarAnim(); } catch (e) {}
+}
 function startRadarAnim() {
   if (radarAnimTimer) clearInterval(radarAnimTimer);
   radarAnimTimer = setInterval(radarAnimTick, 900);
@@ -1515,6 +1550,17 @@ function smoothPan(lat, lon, zoom) {
     // The radar loop keeps playing straight through the glide.
     const dur = Math.min(6, Math.max(2.5, 1.5 + dist / 350));
     map.panTo([lat, lon], { animate: true, duration: dur, easeLinearity: 0.35 });
+    // Park the radar on its newest frame for the glide so the destination's
+    // tiles load first; the animation loop resumes once the camera lands.
+    holdRadarForMove();
+    try {
+      map.once("moveend", () => {
+        if (radarMoveResumeTimer) clearTimeout(radarMoveResumeTimer);
+        radarMoveResumeTimer = setTimeout(releaseRadarAfterMove, 1500);
+      });
+    } catch (e) {}
+    // Hard fallback in case moveend never fires: never leave the loop parked.
+    setTimeout(() => { if (!radarAnimTimer) releaseRadarAfterMove(); }, dur * 1000 + 8000);
     const targetZoom = zoom || map.getZoom();
     if (targetZoom !== map.getZoom()) {
       // Ease the zoom in gently after the glide lands, instead of punching
@@ -3752,6 +3798,32 @@ function prettyVoiceName(v) {
   if (v.network) n += " (online)";
   return n;
 }
+/* Voice list cache, shared by the dropdown and the TV-friendly Prev/Next
+   stepper buttons (a <select> popup is not D-pad navigable on Fire TV). */
+let voiceCache = [];
+function applyVoiceByName(name, speakSample) {
+  try {
+    store.set("tts_voice", name);
+    if (typeof LynxosTts !== "undefined" && LynxosTts.setVoiceName) LynxosTts.setVoiceName(name);
+    const sel = document.getElementById("voice-select");
+    if (sel) sel.value = name;
+  } catch (e) {}
+  if (speakSample) {
+    const v = voiceCache.find((x) => x.name === name);
+    queueSpeech("Voice: " + (v ? prettyVoiceName(v) : name) + ". This is how I sound now.", 999);
+  }
+}
+function cycleVoice(dir) {
+  if (!voiceCache.length) {
+    queueSpeech("Voices are still loading. Try again in a moment.", 999);
+    loadVoiceList();
+    return;
+  }
+  const cur = store.get("tts_voice", "");
+  let i = voiceCache.findIndex((v) => v.name === cur);
+  i = i < 0 ? (dir > 0 ? 0 : voiceCache.length - 1) : (i + dir + voiceCache.length) % voiceCache.length;
+  applyVoiceByName(voiceCache[i].name, true);
+}
 function loadVoiceList() {
   const sel = document.getElementById("voice-select");
   if (!sel) return;
@@ -3770,6 +3842,7 @@ function loadVoiceList() {
     }
     const saved = store.get("tts_voice", "");
     sel.innerHTML = "";
+    voiceCache = voices.slice();
     voices.forEach((v) => {
       const o = document.createElement("option");
       o.value = v.name;
@@ -3780,17 +3853,81 @@ function loadVoiceList() {
   } catch (e) {}
 }
 document.getElementById("voice-select").addEventListener("change", (e) => {
-  const name = e.target.value;
-  try {
-    store.set("tts_voice", name);
-    if (typeof LynxosTts !== "undefined" && LynxosTts.setVoiceName) LynxosTts.setVoiceName(name);
-  } catch (err) {}
-  queueSpeech("This is how I sound now.", 999);
+  applyVoiceByName(e.target.value, true);
 });
+document.getElementById("btn-voice-prev").addEventListener("click", () => cycleVoice(-1));
+document.getElementById("btn-voice-next").addEventListener("click", () => cycleVoice(1));
 
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("Voice check.", 999);
 });
+
+/* In-app updates: checks the GitHub releases feed for this repo, compares
+   the release's version code against the running build, and — on the real
+   app — downloads the new APK and opens the system installer, all without
+   leaving the app. */
+const UPD_REPO = "justinyocum4-code/Weather-In-Real-Time";
+let pendingUpdate = null;
+function parseReleaseTag(tag) {
+  const m = String(tag || "").match(/^v?([\d.]+)\+(\d+)\s*$/);
+  return m ? { name: m[1], code: parseInt(m[2], 10) } : null;
+}
+async function checkForUpdates(manual) {
+  const st = document.getElementById("update-status");
+  const btn = document.getElementById("btn-install-update");
+  try {
+    if (manual && st) st.textContent = "Checking for updates…";
+    const r = await fetch("https://api.github.com/repos/" + UPD_REPO + "/releases/latest");
+    if (!r.ok) throw new Error("net " + r.status);
+    const rel = await r.json();
+    const ver = parseReleaseTag(rel.tag_name);
+    if (!ver) throw new Error("bad tag");
+    if (ver.code > WRT_VERSION_CODE) {
+      const assets = rel.assets || [];
+      const apk = assets.find((a) => /app-release\.apk$/i.test(a.name || "")) || assets[0];
+      pendingUpdate = { name: ver.name, code: ver.code, url: apk && apk.browser_download_url };
+      if (st) st.textContent = "Version " + ver.name + " is available.";
+      if (btn) btn.hidden = false;
+      queueSpeech(manual
+        ? "Version " + ver.name + " is available. Press Download and install to update."
+        : "Weather app update available: version " + ver.name + ". Open Settings to install it.", 60);
+    } else {
+      pendingUpdate = null;
+      if (btn) btn.hidden = true;
+      if (st) st.textContent = "You're on the latest version.";
+      if (manual) queueSpeech("You're on the latest version.", 999);
+    }
+  } catch (e) {
+    if (manual) {
+      if (st) st.textContent = "Couldn't check for updates. Try again later.";
+      queueSpeech("Couldn't check for updates right now.", 999);
+    }
+  }
+}
+document.getElementById("btn-check-update").addEventListener("click", () => checkForUpdates(true));
+document.getElementById("btn-install-update").addEventListener("click", () => {
+  if (!pendingUpdate || !pendingUpdate.url) return;
+  const st = document.getElementById("update-status");
+  if (st) st.textContent = "Downloading version " + pendingUpdate.name + "…";
+  queueSpeech("Downloading the update. The installer will open when it's ready.", 999);
+  try {
+    if (typeof LynxosUpdater !== "undefined" && LynxosUpdater.downloadAndInstall) {
+      LynxosUpdater.downloadAndInstall(pendingUpdate.url);
+    } else {
+      // Web preview or old build: fall back to a plain download link.
+      window.open(pendingUpdate.url, "_blank");
+    }
+  } catch (e) {}
+});
+// Quiet background check, at most once a day: speaks up only when an update
+// is actually waiting.
+try {
+  const lastChk = parseInt(store.get("update_last_check", "0"), 10) || 0;
+  if (Date.now() - lastChk > 24 * 3600 * 1000) {
+    store.set("update_last_check", String(Date.now()));
+    setTimeout(() => checkForUpdates(false), 120000);
+  }
+} catch (e) {}
 
 /* Clock */
 function tickClock() {
