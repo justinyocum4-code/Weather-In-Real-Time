@@ -127,6 +127,7 @@ jobs:
                   }
               }
               dependencies {
+                  implementation 'androidx.core:core:1.12.0'
               }
           }
           EOF
@@ -136,6 +137,7 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
               <uses-feature android:name="android.hardware.camera" android:required="false"/>
               <uses-feature android:name="android.software.leanback" android:required="false"/>
@@ -156,8 +158,24 @@ jobs:
                           <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="com.weatherrealtime.app.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
               </application>
           </manifest>
+          EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <external-files-path name="downloads" path="Download/" />
+          </paths>
           EOF
           cat > app/src/main/java/com/weatherrealtime/app/MainActivity.java <<'EOF'
           package com.weatherrealtime.app;
@@ -296,11 +314,78 @@ jobs:
                           } catch (Exception ignored) {}
                       }
                   }, "LynxosTts");
+                  /* In-app updates: download the new APK with DownloadManager
+                     and hand it to the system installer via FileProvider. */
+                  webView.addJavascriptInterface(new Object() {
+                      @JavascriptInterface
+                      public void downloadAndInstall(String url) {
+                          try {
+                              android.app.DownloadManager dm = (android.app.DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                              android.app.DownloadManager.Request req = new android.app.DownloadManager.Request(android.net.Uri.parse(url));
+                              req.setTitle("Weather In Real Time update");
+                              req.setDescription("Downloading update…");
+                              req.setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                              java.io.File dir = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);
+                              if (dir != null && !dir.exists()) dir.mkdirs();
+                              final java.io.File out = new java.io.File(dir, "weather-update.apk");
+                              try { if (out.exists()) out.delete(); } catch (Exception ignored) {}
+                              req.setDestinationUri(android.net.Uri.fromFile(out));
+                              final long dlId = dm.enqueue(req);
+                              new Thread(new Runnable() {
+                                  @Override public void run() {
+                                      boolean ok = false;
+                                      for (int i = 0; i < 900 && !ok; i++) {
+                                          try { Thread.sleep(1000); } catch (InterruptedException ie) { break; }
+                                          android.database.Cursor c = null;
+                                          try {
+                                              c = dm.query(new android.app.DownloadManager.Query().setFilterById(dlId));
+                                              if (c != null && c.moveToFirst()) {
+                                                  int st = c.getInt(c.getColumnIndex(android.app.DownloadManager.COLUMN_STATUS));
+                                                  if (st == android.app.DownloadManager.STATUS_SUCCESSFUL) ok = true;
+                                                  else if (st == android.app.DownloadManager.STATUS_FAILED) break;
+                                              }
+                                          } catch (Exception ignored) {}
+                                          finally { try { if (c != null) c.close(); } catch (Exception ignored) {} }
+                                      }
+                                      final boolean done = ok;
+                                      runOnUiThread(new Runnable() {
+                                          @Override public void run() {
+                                              if (done) installApk(out);
+                                              else android.widget.Toast.makeText(MainActivity.this, "Update download failed.", android.widget.Toast.LENGTH_LONG).show();
+                                          }
+                                      });
+                                  }
+                              }).start();
+                          } catch (Exception e) {
+                              runOnUiThread(new Runnable() {
+                                  @Override public void run() {
+                                      android.widget.Toast.makeText(MainActivity.this, "Could not start the update.", android.widget.Toast.LENGTH_LONG).show();
+                                  }
+                              });
+                          }
+                      }
+                  }, "LynxosUpdater");
 
                   if (savedInstanceState != null) { webView.restoreState(savedInstanceState); }
                   else { webView.loadUrl("file:///android_asset/www/index.html"); }
                   setContentView(webView);
                   webView.requestFocus();
+              }
+              private void installApk(java.io.File apk) {
+                  // Hand the downloaded APK to the system package installer.
+                  // First run per app: Android takes the user to grant
+                  // "install unknown apps", then they tap install.
+                  try {
+                      android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                          this, "com.weatherrealtime.app.fileprovider", apk);
+                      android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                      intent.setDataAndType(uri, "application/vnd.android.package-archive");
+                      intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                          | android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                      startActivity(intent);
+                  } catch (Exception e) {
+                      android.widget.Toast.makeText(this, "Could not open the installer.", android.widget.Toast.LENGTH_LONG).show();
+                  }
               }
               private void initTts() {
                   String engine = null;
