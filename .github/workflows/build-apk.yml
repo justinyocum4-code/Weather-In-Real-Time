@@ -107,6 +107,7 @@ jobs:
           # Larger Gradle heap for safety on the CI runners (GitHub runners have 16GB RAM).
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx4g
+          android.useAndroidX=true
           EOF
           cat > app/build.gradle <<'EOF'
           plugins {
