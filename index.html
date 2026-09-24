@@ -893,8 +893,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.14";
-const WRT_VERSION_CODE = 72;
+const WRT_VERSION = "3.9.16";
+const WRT_VERSION_CODE = 74;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1057,11 +1057,12 @@ const presenter = {
         this.next(); return;
       }
       this.currentId = id;
-      // Fallback: advance when the speech should be done, in case the
-      // finished-callback never arrives. Covers on-device synthesis time
-      // plus playback with a wide margin, so long reports are never
-      // cut off mid-sentence.
-      const ms = Math.min(240000, Math.max(20000, item.text.length * 200));
+      // Watchdog only: the native side now reports REAL playback
+      // completion (it waits for the audio to actually finish playing),
+      // so this timer should essentially never fire. It exists in case
+      // the finished-callback is ever lost — set far beyond any real
+      // synthesis + playback time so it can never cut a report short.
+      const ms = Math.min(600000, Math.max(45000, item.text.length * 800));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
     };
