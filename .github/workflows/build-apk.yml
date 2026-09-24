@@ -831,7 +831,11 @@ jobs:
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
-                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
+                          // Use the FILE-based constructor. Do NOT pass an
+                          // AssetManager here: newFromAsset is not
+                          // exception-guarded and a null manager segfaults
+                          // the :voice process during construction.
+                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(config);
                           mark("constructed");
                           com.k2fsa.sherpa.onnx.GeneratedAudio warm =
                               kittenTts.generate("Voice ready.", 0, 1.0f);
