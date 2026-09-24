@@ -523,6 +523,12 @@ jobs:
                           }
                       });
                       android.content.Intent svc = new android.content.Intent(this, KittenService.class);
+                      // Start the service FIRST (not just bind): on Android 12+,
+                      // a bound-only service cannot become a foreground service —
+                      // startForeground() throws and the :voice process is killed
+                      // as a background process. startService() makes the
+                      // foreground promotion legal.
+                      try { startService(svc); } catch (Throwable ignored) {}
                       bindService(svc, voiceConn, android.content.Context.BIND_AUTO_CREATE);
                       // Watchdog: if the service never reports back, stop waiting for it.
                       // 4 minutes: the A12's slow storage can take a while to
@@ -812,6 +818,12 @@ jobs:
               }
 
               @Override public IBinder onBind(Intent intent) { return messenger.getBinder(); }
+
+              @Override public int onStartCommand(Intent intent, int flags, int startId) {
+                  // START_STICKY: if the :voice process is ever killed, restart
+                  // the service so the AI voice comes back without an app restart.
+                  return START_STICKY;
+              }
 
               private void mark(String s) {
                   try {
