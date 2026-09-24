@@ -435,6 +435,14 @@ jobs:
                                       }
                                   }
                               } catch (Throwable ignored) {}
+                              // v3.9.11: show .started and .destroyed markers.
+                              try {
+                                  java.io.File st = new java.io.File(getFilesDir(), "kitten-voice/.started");
+                                  java.io.File de = new java.io.File(getFilesDir(), "kitten-voice/.destroyed");
+                                  if (st.exists()) step += " | started=YES";
+                                  else step += " | started=NO";
+                                  if (de.exists()) step += " | DESTROYED";
+                              } catch (Throwable ignored) {}
                               return step;
                           } catch (Throwable th) { return ""; }
                       }
@@ -859,7 +867,28 @@ jobs:
               @Override public int onStartCommand(Intent intent, int flags, int startId) {
                   // START_STICKY: if the :voice process is ever killed, restart
                   // the service so the AI voice comes back without an app restart.
+                  // v3.9.11: write .started marker to prove startService() worked.
+                  try {
+                      java.io.File d = new java.io.File(getFilesDir(), "kitten-voice");
+                      d.mkdirs();
+                      java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(d, ".started"));
+                      o.write(("started " + System.currentTimeMillis()).getBytes("UTF-8"));
+                      o.close();
+                  } catch (Throwable ignored) {}
                   return START_STICKY;
+              }
+
+              @Override public void onDestroy() {
+                  // v3.9.11: write .destroyed marker to prove the service was
+                  // destroyed (vs the process dying).
+                  try {
+                      java.io.File d = new java.io.File(getFilesDir(), "kitten-voice");
+                      d.mkdirs();
+                      java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(d, ".destroyed"));
+                      o.write(("destroyed " + System.currentTimeMillis()).getBytes("UTF-8"));
+                      o.close();
+                  } catch (Throwable ignored) {}
+                  super.onDestroy();
               }
 
               private void mark(String s) {
