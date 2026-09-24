@@ -414,7 +414,28 @@ jobs:
                               int r = in.read(b);
                               in.close();
                               if (r <= 0) return "";
-                              return new String(b, 0, r, "UTF-8");
+                              String step = new String(b, 0, r, "UTF-8");
+                              // v3.9.10: append heartbeat age so we know WHEN
+                              // the :voice process died (if it did).
+                              try {
+                                  java.io.File hb = new java.io.File(getFilesDir(), "kitten-voice/.heartbeat");
+                                  if (hb.exists()) {
+                                      java.io.FileInputStream hin = new java.io.FileInputStream(hb);
+                                      byte[] hbb = new byte[(int) Math.min(hb.length(), 100)];
+                                      int hr = hin.read(hbb);
+                                      hin.close();
+                                      if (hr > 0) {
+                                          String hbs = new String(hbb, 0, hr, "UTF-8").trim();
+                                          String[] parts = hbs.split(" ");
+                                          if (parts.length == 2) {
+                                              long hbt = Long.parseLong(parts[1]);
+                                              long age = (System.currentTimeMillis() - hbt) / 1000;
+                                              step += " | heartbeat " + age + "s ago (pid " + parts[0] + ")";
+                                          }
+                                      }
+                                  }
+                              } catch (Throwable ignored) {}
+                              return step;
                           } catch (Throwable th) { return ""; }
                       }
                       // Try the AI voice again (starts a fresh :voice process).
@@ -812,6 +833,22 @@ jobs:
                               .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                               .build();
                       startForeground(1, notif);
+                  } catch (Throwable ignored) {}
+                  // Heartbeat: write PID and timestamp every 5s so the main
+                  // app can tell WHEN the :voice process died (v3.9.10 diag).
+                  try {
+                      final java.io.File hb = new java.io.File(getFilesDir(), "kitten-voice/.heartbeat");
+                      final int pid = android.os.Process.myPid();
+                      new Thread(new Runnable() { @Override public void run() {
+                          try {
+                              while (true) {
+                                  java.io.FileOutputStream o = new java.io.FileOutputStream(hb);
+                                  o.write((pid + " " + System.currentTimeMillis()).getBytes("UTF-8"));
+                                  o.close();
+                                  Thread.sleep(5000);
+                              }
+                          } catch (Throwable ignored) {}
+                      } }).start();
                   } catch (Throwable ignored) {}
                   messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
                   startInit();
