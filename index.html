@@ -889,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.20";
-const WRT_VERSION_CODE = 77;
+const WRT_VERSION = "3.9.21";
+const WRT_VERSION_CODE = 79;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1678,7 +1678,10 @@ function startIdleDrift() {
       if (document.hidden) return;
       // Anything happening takes priority over the drift.
       if (presenter.busy || presenter.queue.length) return;
-      if (currentFeatures.length || currentLsrs.length) return;
+      // The drift also wanders while alerts are active, so the map keeps a
+      // gentle YallBot-style motion after the tour has read each alert once
+      // and rested. It never narrates — any new alert or report takes over
+      // instantly and pauses the drift. A nearby storm cell keeps the camera.
       if (stormCellLayer && stormCellLayer.getLayers().length) return;
       driftIndex = (driftIndex + 1) % DRIFT_POINTS.length;
       const p = DRIFT_POINTS[driftIndex];
@@ -2484,7 +2487,7 @@ function recapAlerts() {
     return;
   }
   const top = feats.slice(0, 5);
-  let text = "Recap. " + feats.length + " active alerts nationwide. The most severe: ";
+  let text = "Recap. " + feats.length + " active alerts in the United States. The most severe: ";
   text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {}, f)).join(" ");
   if (feats.length > 5) text += " Plus " + (feats.length - 5) + " more alerts in the list.";
   const c0 = alertCentroid(feats[0]);
@@ -2492,13 +2495,13 @@ function recapAlerts() {
 }
 
 const nextStartupClear = cycler([
-  "Weather In Real Time. All clear. No active weather alerts in the country right now.",
+  "Weather In Real Time. All clear. No active weather alerts in the United States right now.",
   "Weather In Real Time. No active weather alerts to report.",
-  "Weather In Real Time. All quiet nationwide.",
+  "Weather In Real Time. All quiet in the United States.",
 ]);
 const nextStartupAlerts = cycler([
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now.",
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ".",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + " in the United States" + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active in the United States" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ".",
 ]);
 /* Startup summary: plain alert counts. No opener, no jokes. */
 function startupSummaryText() {
