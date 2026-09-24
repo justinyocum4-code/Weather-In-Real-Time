@@ -454,7 +454,7 @@ jobs:
                                   java.io.File ve = new java.io.File(getFilesDir(), "kitten-voice/.voice-event");
                                   if (ve.exists()) {
                                       java.io.FileInputStream vin = new java.io.FileInputStream(ve);
-                                      byte[] vb = new byte[(int) Math.min(ve.length(), 300)];
+                                      byte[] vb = new byte[(int) Math.min(ve.length(), 600)];
                                       int vr = vin.read(vb);
                                       vin.close();
                                       if (vr > 0) step += " | voice: " + new String(vb, 0, vr, "UTF-8");
@@ -936,13 +936,27 @@ jobs:
 
               // v3.9.13: rolling record of what the voice did last —
               // speak requests, generation, playback, stops, failures.
-              // Read by the Settings diagnostic.
+              // v3.9.14: timestamped log (last ~2KB), not just the last
+              // event, so the Settings diagnostic shows the sequence.
               private void markVoice(String s) {
                   try {
                       java.io.File d = new java.io.File(getFilesDir(), "kitten-voice");
                       d.mkdirs();
-                      java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(d, ".voice-event"));
-                      o.write(s.getBytes("UTF-8"));
+                      java.io.File f = new java.io.File(d, ".voice-event");
+                      String prev = "";
+                      if (f.exists()) {
+                          java.io.FileInputStream in = new java.io.FileInputStream(f);
+                          byte[] b = new byte[(int) Math.min(f.length(), 2000)];
+                          int r = in.read(b);
+                          in.close();
+                          if (r > 0) prev = new String(b, 0, r, "UTF-8");
+                      }
+                      String ts = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                          .format(new java.util.Date());
+                      String all = prev + "[" + ts + "] " + s + "\n";
+                      if (all.length() > 2000) all = all.substring(all.length() - 2000);
+                      java.io.FileOutputStream o = new java.io.FileOutputStream(f);
+                      o.write(all.getBytes("UTF-8"));
                       o.close();
                   } catch (Throwable ignored) {}
               }
@@ -1051,10 +1065,12 @@ jobs:
                                       sendDone(replyTo, seq);
                                       break;
                                   }
+                                  // v3.9.14: a new utterance cancels any
+                                  // in-progress one, so two generate() calls
+                                  // never thrash the CPU at once.
+                                  gen++;
                                   final int g = gen;
-                                  new Thread(new Runnable() { @Override public void run() {
-                                      speakWorker(seq, text, g, replyTo);
-                                  } }).start();
+                                  speakWorker(seq, text, g, replyTo);
                                   break;
                               }
                               case MSG_STOP:
@@ -1092,41 +1108,90 @@ jobs:
                   } catch (Throwable ignored) {}
               }
 
-              private void speakWorker(int seq, String text, int g, Messenger replyTo) {
+              private final java.util.concurrent.ExecutorService speakExec =
+                  java.util.concurrent.Executors.newSingleThreadExecutor();
+
+              // v3.9.14: split long text into sentence-bounded chunks so
+              // each generate() call stays short and audio starts sooner.
+              private java.util.List<String> splitSentences(String text) {
+                  java.util.List<String> out = new java.util.ArrayList<String>();
+                  try {
+                      String[] parts = text.split("(?<=[.!?])\\s+");
+                      StringBuilder cur = new StringBuilder();
+                      for (String p : parts) {
+                          if (cur.length() + p.length() + 1 > 160 && cur.length() > 0) {
+                              out.add(cur.toString().trim());
+                              cur = new StringBuilder();
+                          }
+                          if (cur.length() > 0) cur.append(' ');
+                          cur.append(p);
+                      }
+                      if (cur.length() > 0) out.add(cur.toString().trim());
+                  } catch (Throwable ignored) {}
+                  if (out.isEmpty()) out.add(text);
+                  return out;
+              }
+
+              // v3.9.14: runs on the single speak thread — one utterance at
+              // a time, so two generate() calls never thrash the CPU.
+              private void speakWorker(final int seq, final String text, final int g, final Messenger replyTo) {
+                  try {
+                      speakExec.execute(new Runnable() { @Override public void run() {
+                          speakChunks(seq, text, g, replyTo);
+                      } });
+                  } catch (Throwable t) {
+                      new Thread(new Runnable() { @Override public void run() {
+                          speakChunks(seq, text, g, replyTo);
+                      } }).start();
+                  }
+              }
+
+              private void speakChunks(int seq, String text, int g, Messenger replyTo) {
                   try {
                       com.k2fsa.sherpa.onnx.OfflineTts tts = kittenTts;
                       if (tts == null || g != gen) { sendDone(replyTo, seq); return; }
-                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = tts.generate(text, 0, 1.0f);
-                      if (g != gen) { sendDone(replyTo, seq); return; }
-                      float[] samples = audio != null ? audio.getSamples() : null;
-                      int sr = audio != null ? audio.getSampleRate() : 0;
-                      if (samples == null || samples.length == 0 || sr <= 0) { sendDone(replyTo, seq); return; }
-                      markVoice("generated " + samples.length + " samples @" + sr + "Hz");
-                      short[] pcm = new short[samples.length];
-                      for (int i = 0; i < samples.length; i++) {
-                          float v = Math.max(-1f, Math.min(1f, samples[i]));
-                          pcm[i] = (short) (v * 32767);
+                      java.util.List<String> chunks = splitSentences(text);
+                      markVoice("speak " + chunks.size() + " chunk(s)");
+                      int totalPlayed = 0;
+                      for (String chunk : chunks) {
+                          if (g != gen) break;
+                          long t0 = System.currentTimeMillis();
+                          com.k2fsa.sherpa.onnx.GeneratedAudio audio = tts.generate(chunk, 0, 1.0f);
+                          long dt = System.currentTimeMillis() - t0;
+                          if (g != gen) break;
+                          float[] samples = audio != null ? audio.getSamples() : null;
+                          int sr = audio != null ? audio.getSampleRate() : 0;
+                          if (samples == null || samples.length == 0 || sr <= 0) {
+                              markVoice("chunk EMPTY after " + dt + "ms");
+                              continue;
+                          }
+                          markVoice("chunk gen " + samples.length + " samples in " + dt + "ms");
+                          short[] pcm = new short[samples.length];
+                          for (int i = 0; i < samples.length; i++) {
+                              float v = Math.max(-1f, Math.min(1f, samples[i]));
+                              pcm[i] = (short) (v * 32767);
+                          }
+                          int ch = AudioFormat.CHANNEL_OUT_MONO;
+                          int fmt = AudioFormat.ENCODING_PCM_16BIT;
+                          int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
+                          AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
+                              Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
+                          track = tr;
+                          tr.play();
+                          int off = 0;
+                          while (off < pcm.length && g == gen) {
+                              int len = Math.min(8192, pcm.length - off);
+                              tr.write(pcm, off, len);
+                              off += len;
+                          }
+                          try { tr.stop(); } catch (Throwable ignored) {}
+                          try { tr.release(); } catch (Throwable ignored) {}
+                          if (track == tr) track = null;
+                          totalPlayed += off;
                       }
-                      int ch = AudioFormat.CHANNEL_OUT_MONO;
-                      int fmt = AudioFormat.ENCODING_PCM_16BIT;
-                      int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
-                      AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
-                          Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
-                      track = tr;
-                      speakInfo = "played " + pcm.length + " samples @ " + sr + "Hz";
-                      tr.play();
-                      int off = 0;
-                      while (off < pcm.length && g == gen) {
-                          int len = Math.min(8192, pcm.length - off);
-                          tr.write(pcm, off, len);
-                          off += len;
-                      }
-                      // v3.9.13: distinguish finished playback from cut-short.
-                      if (off >= pcm.length) markVoice("played OK " + pcm.length + " samples");
-                      else markVoice("cut short at " + off + "/" + pcm.length + " samples");
-                      try { tr.stop(); } catch (Throwable ignored) {}
-                      try { tr.release(); } catch (Throwable ignored) {}
-                      if (track == tr) track = null;
+                      if (g == gen) markVoice("played OK " + totalPlayed + " samples");
+                      else markVoice("cut short, played " + totalPlayed + " samples");
+                      speakInfo = "played " + totalPlayed + " samples";
                   } catch (Throwable t) {
                       String msg = String.valueOf(t);
                       if (msg.length() > 200) msg = msg.substring(0, 200);
