@@ -440,21 +440,26 @@ jobs:
                                       }
                                   }
                               } catch (Throwable ignored) {}
-                              // v3.9.11: show .started and .destroyed markers.
+                              // v3.9.11: show the .destroyed marker (tells a
+                              // service destroy apart from a process death).
+                              // v3.9.15: the .started marker is gone from
+                              // here — the first-run asset re-copy can wipe
+                              // it after onStartCommand wrote it, so
+                              // "started=NO" was noise. The heartbeat above
+                              // already proves the process is alive.
                               try {
-                                  java.io.File st = new java.io.File(getFilesDir(), "kitten-voice/.started");
                                   java.io.File de = new java.io.File(getFilesDir(), "kitten-voice/.destroyed");
-                                  if (st.exists()) step += " | started=YES";
-                                  else step += " | started=NO";
                                   if (de.exists()) step += " | DESTROYED";
                               } catch (Throwable ignored) {}
                               // v3.9.13: last voice event (speak req, generated,
                               // played OK / cut short / STOP / FAILED).
+                              // v3.9.15: read 900 chars (was 600) — chunked
+                              // pipelined speech logs more events per report.
                               try {
                                   java.io.File ve = new java.io.File(getFilesDir(), "kitten-voice/.voice-event");
                                   if (ve.exists()) {
                                       java.io.FileInputStream vin = new java.io.FileInputStream(ve);
-                                      byte[] vb = new byte[(int) Math.min(ve.length(), 600)];
+                                      byte[] vb = new byte[(int) Math.min(ve.length(), 900)];
                                       int vr = vin.read(vb);
                                       vin.close();
                                       if (vr > 0) step += " | voice: " + new String(vb, 0, vr, "UTF-8");
@@ -994,7 +999,9 @@ jobs:
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
                               new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
                           modelConfig.setKitten(kitten);
-                          modelConfig.setNumThreads(2);
+                          // v3.9.15: 4 threads — the A12's 8 weak cores
+                          // generate noticeably faster than with 2.
+                          modelConfig.setNumThreads(4);
                           com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
@@ -1065,16 +1072,36 @@ jobs:
                                       sendDone(replyTo, seq);
                                       break;
                                   }
-                                  // v3.9.14: a new utterance cancels any
-                                  // in-progress one, so two generate() calls
-                                  // never thrash the CPU at once.
-                                  gen++;
-                                  final int g = gen;
-                                  speakWorker(seq, text, g, replyTo);
+                                  // v3.9.15: a new utterance NEVER cancels one
+                                  // in progress. Cancelling caused the "few
+                                  // seconds then silence" death spiral: the
+                                  // app's next queued report arrived ~20s in
+                                  // and killed the still-generating utterance
+                                  // at 95% done, over and over. Instead the
+                                  // newest request waits its turn, replacing
+                                  // any older waiting one.
+                                  boolean startNow;
+                                  synchronized (pendingLock) {
+                                      if (speaking) {
+                                          pendingText = text;
+                                          pendingSeq = seq;
+                                          pendingReplyTo = replyTo;
+                                          startNow = false;
+                                      } else {
+                                          speaking = true;
+                                          startNow = true;
+                                      }
+                                  }
+                                  if (startNow) speakWorker(seq, text, replyTo);
+                                  else markVoice("queued " + text.length() + " chars");
                                   break;
                               }
                               case MSG_STOP:
-                                  gen++;
+                                  synchronized (pendingLock) {
+                                      gen++;
+                                      pendingText = null;
+                                      pendingReplyTo = null;
+                                  }
                                   markVoice("STOP received");
                                   try { AudioTrack tr = track; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
                                   break;
@@ -1110,16 +1137,35 @@ jobs:
 
               private final java.util.concurrent.ExecutorService speakExec =
                   java.util.concurrent.Executors.newSingleThreadExecutor();
+              // v3.9.15: chunk playback runs here while the speak thread
+              // generates the next chunk — audio gaps shrink because
+              // generation hides behind playback. Generation itself always
+              // stays on the single speak thread, so two generate() calls
+              // never thrash the CPU at once.
+              private final java.util.concurrent.ExecutorService playExec =
+                  java.util.concurrent.Executors.newSingleThreadExecutor();
+              // v3.9.15: newest-wins waiting utterance (see MSG_SPEAK).
+              // Guarded by pendingLock; `speaking` is true while the speak
+              // thread owns an utterance (or is about to start one).
+              private final Object pendingLock = new Object();
+              private volatile boolean speaking = false;
+              private String pendingText = null;
+              private int pendingSeq = 0;
+              private Messenger pendingReplyTo = null;
+              // 16-bit PCM for one chunk, plus its sample rate.
+              private static class Pcm { short[] s; int sr; }
 
               // v3.9.14: split long text into sentence-bounded chunks so
               // each generate() call stays short and audio starts sooner.
+              // v3.9.15: 100 chars per chunk (was 160) — smaller first
+              // chunk means the first audio starts sooner on the A12.
               private java.util.List<String> splitSentences(String text) {
                   java.util.List<String> out = new java.util.ArrayList<String>();
                   try {
                       String[] parts = text.split("(?<=[.!?])\\s+");
                       StringBuilder cur = new StringBuilder();
                       for (String p : parts) {
-                          if (cur.length() + p.length() + 1 > 160 && cur.length() > 0) {
+                          if (cur.length() + p.length() + 1 > 100 && cur.length() > 0) {
                               out.add(cur.toString().trim());
                               cur = new StringBuilder();
                           }
@@ -1132,62 +1178,128 @@ jobs:
                   return out;
               }
 
-              // v3.9.14: runs on the single speak thread — one utterance at
-              // a time, so two generate() calls never thrash the CPU.
-              private void speakWorker(final int seq, final String text, final int g, final Messenger replyTo) {
+              // v3.9.15: utterance loop on the single speak thread. When an
+              // utterance finishes, a queued (newest-wins) utterance starts
+              // right away; otherwise the thread idles until the next
+              // MSG_SPEAK. Only MSG_STOP ends a loop early.
+              private void speakWorker(final int seq0, final String text0, final Messenger replyTo0) {
+                  Runnable loop = new Runnable() { @Override public void run() {
+                      int seq = seq0; String text = text0; Messenger replyTo = replyTo0;
+                      for (;;) {
+                          final int g;
+                          synchronized (pendingLock) { g = gen; }
+                          speakPipelined(seq, text, g, replyTo);
+                          synchronized (pendingLock) {
+                              // STOP clears the queue and bumps gen, so a
+                              // stopped utterance never resumes anything.
+                              if (pendingText != null && g == gen) {
+                                  seq = pendingSeq; text = pendingText; replyTo = pendingReplyTo;
+                                  pendingText = null; pendingReplyTo = null;
+                                  markVoice("dequeued " + text.length() + " chars");
+                                  continue;
+                              }
+                              speaking = false;
+                              break;
+                          }
+                      }
+                  } };
                   try {
-                      speakExec.execute(new Runnable() { @Override public void run() {
-                          speakChunks(seq, text, g, replyTo);
-                      } });
+                      speakExec.execute(loop);
                   } catch (Throwable t) {
-                      new Thread(new Runnable() { @Override public void run() {
-                          speakChunks(seq, text, g, replyTo);
-                      } }).start();
+                      new Thread(loop).start();
                   }
               }
 
-              private void speakChunks(int seq, String text, int g, Messenger replyTo) {
+              // v3.9.15: generate one chunk into 16-bit PCM. Runs on the
+              // speak thread only — never concurrently with another
+              // generate() call.
+              private Pcm genChunk(com.k2fsa.sherpa.onnx.OfflineTts tts, String chunk, int g) {
+                  long t0 = System.currentTimeMillis();
+                  com.k2fsa.sherpa.onnx.GeneratedAudio audio = tts.generate(chunk, 0, 1.0f);
+                  long dt = System.currentTimeMillis() - t0;
+                  if (g != gen) return null;
+                  float[] samples = audio != null ? audio.getSamples() : null;
+                  int sr = audio != null ? audio.getSampleRate() : 0;
+                  if (samples == null || samples.length == 0 || sr <= 0) {
+                      markVoice("chunk EMPTY after " + dt + "ms");
+                      return null;
+                  }
+                  markVoice("chunk gen " + samples.length + " samples in " + dt + "ms");
+                  short[] pcm = new short[samples.length];
+                  for (int i = 0; i < samples.length; i++) {
+                      float v = Math.max(-1f, Math.min(1f, samples[i]));
+                      pcm[i] = (short) (v * 32767);
+                  }
+                  Pcm p = new Pcm(); p.s = pcm; p.sr = sr;
+                  return p;
+              }
+
+              // v3.9.15: blocking PCM playback for the playback thread.
+              // Returns the samples actually written.
+              private int playNow(final short[] pcm, final int sr, final int g) {
+                  int ch = AudioFormat.CHANNEL_OUT_MONO;
+                  int fmt = AudioFormat.ENCODING_PCM_16BIT;
+                  int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
+                  AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
+                      Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
+                  track = tr;
+                  int off = 0;
+                  try {
+                      tr.play();
+                      while (off < pcm.length && g == gen) {
+                          int len = Math.min(8192, pcm.length - off);
+                          tr.write(pcm, off, len);
+                          off += len;
+                      }
+                  } catch (Throwable ignored) {}
+                  try { tr.stop(); } catch (Throwable ignored) {}
+                  try { tr.release(); } catch (Throwable ignored) {}
+                  if (track == tr) track = null;
+                  return off;
+              }
+
+              // v3.9.15: pipelined utterance. The first chunk generates
+              // (the one unavoidable wait); then each chunk plays on the
+              // playback thread while the speak thread already generates
+              // the next one — gaps between chunks shrink from ~15-30s of
+              // silence to a few seconds.
+              private void speakPipelined(int seq, String text, int g, Messenger replyTo) {
                   try {
                       com.k2fsa.sherpa.onnx.OfflineTts tts = kittenTts;
                       if (tts == null || g != gen) { sendDone(replyTo, seq); return; }
                       java.util.List<String> chunks = splitSentences(text);
                       markVoice("speak " + chunks.size() + " chunk(s)");
                       int totalPlayed = 0;
-                      for (String chunk : chunks) {
-                          if (g != gen) break;
-                          long t0 = System.currentTimeMillis();
-                          com.k2fsa.sherpa.onnx.GeneratedAudio audio = tts.generate(chunk, 0, 1.0f);
-                          long dt = System.currentTimeMillis() - t0;
-                          if (g != gen) break;
-                          float[] samples = audio != null ? audio.getSamples() : null;
-                          int sr = audio != null ? audio.getSampleRate() : 0;
-                          if (samples == null || samples.length == 0 || sr <= 0) {
-                              markVoice("chunk EMPTY after " + dt + "ms");
-                              continue;
+                      Pcm cur = genChunk(tts, chunks.get(0), g);
+                      for (int i = 0; i < chunks.size() && g == gen; i++) {
+                          // Play the current chunk on the playback thread...
+                          final java.util.concurrent.Future<Integer> playF;
+                          if (cur != null && cur.s != null) {
+                              final short[] pcm = cur.s;
+                              final int sr = cur.sr;
+                              final int gg = g;
+                              playF = playExec.submit(new java.util.concurrent.Callable<Integer>() {
+                                  @Override public Integer call() { return playNow(pcm, sr, gg); }
+                              });
+                          } else playF = null;
+                          // ...while this speak thread generates the next.
+                          Pcm next = null;
+                          if (i + 1 < chunks.size() && g == gen) {
+                              next = genChunk(tts, chunks.get(i + 1), g);
                           }
-                          markVoice("chunk gen " + samples.length + " samples in " + dt + "ms");
-                          short[] pcm = new short[samples.length];
-                          for (int i = 0; i < samples.length; i++) {
-                              float v = Math.max(-1f, Math.min(1f, samples[i]));
-                              pcm[i] = (short) (v * 32767);
+                          // Wait for the current chunk's audio to finish.
+                          if (playF != null) {
+                              try {
+                                  while (g == gen) {
+                                      try {
+                                          totalPlayed += playF.get(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                                          break;
+                                      } catch (java.util.concurrent.TimeoutException te) { /* keep playing */ }
+                                  }
+                                  if (g != gen) { try { playF.cancel(true); } catch (Throwable ignored) {} }
+                              } catch (Throwable t) { /* counted as 0 played */ }
                           }
-                          int ch = AudioFormat.CHANNEL_OUT_MONO;
-                          int fmt = AudioFormat.ENCODING_PCM_16BIT;
-                          int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
-                          AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
-                              Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
-                          track = tr;
-                          tr.play();
-                          int off = 0;
-                          while (off < pcm.length && g == gen) {
-                              int len = Math.min(8192, pcm.length - off);
-                              tr.write(pcm, off, len);
-                              off += len;
-                          }
-                          try { tr.stop(); } catch (Throwable ignored) {}
-                          try { tr.release(); } catch (Throwable ignored) {}
-                          if (track == tr) track = null;
-                          totalPlayed += off;
+                          cur = next;
                       }
                       if (g == gen) markVoice("played OK " + totalPlayed + " samples");
                       else markVoice("cut short, played " + totalPlayed + " samples");
