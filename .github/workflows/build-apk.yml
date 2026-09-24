@@ -1001,7 +1001,9 @@ jobs:
                           modelConfig.setKitten(kitten);
                           // v3.9.15: 4 threads — the A12's 8 weak cores
                           // generate noticeably faster than with 2.
-                          modelConfig.setNumThreads(4);
+                          // v3.9.17: 8 threads — one per core. Faster chunk
+                          // generation means shorter pauses between sentences.
+                          modelConfig.setNumThreads(8);
                           com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
@@ -1159,6 +1161,8 @@ jobs:
               // each generate() call stays short and audio starts sooner.
               // v3.9.15: 100 chars per chunk (was 160) — smaller first
               // chunk means the first audio starts sooner on the A12.
+              // v3.9.17: 60 chars — even faster first audio and shorter
+              // pauses between chunks on the A12.
               // v3.9.16: hard-split any single sentence still over the limit
               // at word boundaries, so one long sentence can never force a
               // huge generate() call and a long silence.
@@ -1168,7 +1172,7 @@ jobs:
                       String[] parts = text.split("(?<=[.!?])\\s+");
                       StringBuilder cur = new StringBuilder();
                       for (String p : parts) {
-                          if (cur.length() + p.length() + 1 > 100 && cur.length() > 0) {
+                          if (cur.length() + p.length() + 1 > 60 && cur.length() > 0) {
                               out.add(cur.toString().trim());
                               cur = new StringBuilder();
                           }
@@ -1182,9 +1186,9 @@ jobs:
                   java.util.List<String> hard = new java.util.ArrayList<String>();
                   for (String c : out) {
                       String s2 = c;
-                      while (s2.length() > 100) {
-                          int cut = s2.lastIndexOf(' ', 100);
-                          if (cut <= 0) cut = 100;
+                      while (s2.length() > 60) {
+                          int cut = s2.lastIndexOf(' ', 60);
+                          if (cut <= 0) cut = 60;
                           hard.add(s2.substring(0, cut).trim());
                           s2 = s2.substring(cut).trim();
                       }
