@@ -94,6 +94,7 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
+                  maven { url "https://jitpack.io" } // sherpa-onnx (Kitten voice engine)
               }
           }
           rootProject.name = "WeatherRealtime"
@@ -129,6 +130,11 @@ jobs:
               }
               dependencies {
                   implementation 'androidx.core:core:1.12.0'
+                  // On-device AI voice (Kitten via sherpa-onnx). Official build, re-published by JitPack.
+                  implementation 'com.github.k2-fsa:sherpa-onnx:v1.12.40'
+                  // The voice engine is written in Kotlin; without the stdlib it crashes
+                  // on startup with NoClassDefFoundError (kotlin/jvm/internal/Intrinsics).
+                  implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
               }
           }
           EOF
@@ -202,6 +208,14 @@ jobs:
               private String pendingTts = null;
               private long lastBackPress = 0;
               private int ttsUtteranceSeq = 0;
+              // Kitten on-device AI voice (the app's only voice): the
+              // sherpa-onnx engine plus serialized playback state.
+              private com.k2fsa.sherpa.onnx.OfflineTts kittenTts;
+              private boolean kittenReady = false;
+              private boolean kittenStarting = false;
+              private int kittenGen = 0; // speak() generation: stop() silences older ones
+              private android.media.AudioTrack kittenTrack;
+              private String kittenSpeakInfo;
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -270,6 +284,7 @@ jobs:
                       }
                   }, "LynxosStore");
                   initTts();
+                  kittenEnsureInit(); // warm up the on-device AI voice in the background
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public String speak(String text) {
@@ -283,38 +298,71 @@ jobs:
                           pendingTts = null;
                           try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
                       }
-                      /* v3.0 voice picker: list English voices as JSON
-                         [{name, locale, quality, network}] so the user can
-                         choose the one they like best. */
-                      @JavascriptInterface
-                      public String getVoices() {
-                          try {
-                              if (tts == null) return "[]";
-                              java.util.Set<android.speech.tts.Voice> voices = tts.getVoices();
-                              org.json.JSONArray arr = new org.json.JSONArray();
-                              if (voices == null) return "[]";
-                              for (android.speech.tts.Voice v : voices) {
-                                  java.util.Locale loc = v.getLocale();
-                                  if (loc == null || !"en".equalsIgnoreCase(loc.getLanguage())) continue;
-                                  org.json.JSONObject o = new org.json.JSONObject();
-                                  o.put("name", v.getName());
-                                  o.put("locale", loc.toString());
-                                  try { o.put("quality", v.getQuality()); } catch (Exception ignored) {}
-                                  try { o.put("network", v.isNetworkConnectionRequired()); } catch (Exception ignored) {}
-                                  arr.put(o);
-                              }
-                              return arr.toString();
-                          } catch (Exception e) { return "[]"; }
-                      }
-                      /* Save the user's voice choice and apply it now. */
-                      @JavascriptInterface
-                      public void setVoiceName(String name) {
-                          try {
-                              getSharedPreferences("weather_realtime", MODE_PRIVATE).edit().putString("tts_voice", name).commit();
-                              applyVoiceName(name);
-                          } catch (Exception ignored) {}
-                      }
+                      /* The device voice is no longer a choice — it only
+                         speaks one emergency sentence if the AI voice fails
+                         to load. The voice picker is gone. */
                   }, "LynxosTts");
+                  /* Kitten on-device AI voice: the app's only voice. Free,
+                     offline, no key, no quota. Returns an utterance id, or
+                     null when the voice isn't warmed up yet (the page waits
+                     and retries). Synthesis runs on a worker thread; playback
+                     goes through one serialized AudioTrack so utterances can
+                     never double up. */
+                  webView.addJavascriptInterface(new Object() {
+                      @JavascriptInterface
+                      public String speak(String text) {
+                          try {
+                              if (text == null || text.isEmpty()) { kittenSpeakInfo = "speak skipped: empty text"; return null; }
+                              if (!kittenReady || kittenTts == null) { kittenSpeakInfo = "speak skipped: voice not ready"; kittenEnsureInit(); return null; }
+                              kittenSpeakInfo = "speak called: " + text.length() + " chars";
+                              kittenGen++; // silence anything currently playing
+                              try { android.media.AudioTrack tr = kittenTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                              final String id = "kv" + (++ttsUtteranceSeq);
+                              final int gen = kittenGen;
+                              final String t = text;
+                              new Thread(new Runnable() { @Override public void run() {
+                                  kittenSpeakWorker(id, t, gen);
+                              } }).start();
+                              return id;
+                          } catch (Throwable th) {
+                              String msg = String.valueOf(th);
+                              if (msg.length() > 200) msg = msg.substring(0, 200);
+                              kittenSpeakInfo = "speak FAILED at entry: " + msg;
+                              return null;
+                          }
+                      }
+                      @JavascriptInterface
+                      public void stop() {
+                          kittenGen++;
+                          try { android.media.AudioTrack tr = kittenTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                      }
+                      // True once the offline AI voice is warmed up and speaking.
+                      @JavascriptInterface
+                      public boolean isReady() { return kittenReady && kittenTts != null; }
+                      // If the last init attempt failed, the reason (saved to
+                      // a file so it survives to the next launch). Empty when
+                      // the voice is ready or no failure was recorded.
+                      @JavascriptInterface
+                      public String getLastError() {
+                          try {
+                              if (kittenReady) return "";
+                              java.io.File f = new java.io.File(getFilesDir(), "kitten-voice/.last-error");
+                              if (!f.exists()) return "";
+                              java.io.FileInputStream in = new java.io.FileInputStream(f);
+                              byte[] b = new byte[(int) Math.min(f.length(), 512)];
+                              int n = in.read(b); in.close();
+                              if (n <= 0) return "";
+                              return new String(b, 0, n, "UTF-8");
+                          } catch (Throwable th) { return ""; }
+                      }
+                      // Last synthesis/playback outcome in plain words.
+                      // Shown in Settings under the voice status.
+                      @JavascriptInterface
+                      public String getLastSpeakInfo() {
+                          try { return kittenSpeakInfo == null ? "" : kittenSpeakInfo; }
+                          catch (Throwable th) { return ""; }
+                      }
+                  }, "KittenVoice");
                   /* In-app updates: download the new APK with DownloadManager
                      and hand it to the system installer via FileProvider. */
                   webView.addJavascriptInterface(new Object() {
@@ -372,6 +420,161 @@ jobs:
                   setContentView(webView);
                   webView.requestFocus();
               }
+              /* Copy the bundled Kitten voice out of the APK into private
+                 storage (native code needs real file paths), then build
+                 the sherpa-onnx TTS engine on a worker thread. The copy is
+                 resumable: files already synced are skipped and each file is
+                 written atomically, so killing the app mid-copy just resumes
+                 next launch instead of starting over. */
+              private void kittenEnsureInit() {
+                  if (kittenReady || kittenStarting) return;
+                  kittenStarting = true;
+                  new Thread(new Runnable() { @Override public void run() {
+                      try {
+                          java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
+                          java.io.File marker = new java.io.File(dest, ".ready");
+                          java.io.File errFile = new java.io.File(dest, ".last-error");
+                          if (!marker.exists()) {
+                              syncAssetDir("kitten-voice", dest);
+                              marker.createNewFile();
+                          }
+                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
+                          java.io.File voicesFile = new java.io.File(dest, "voices.bin");
+                          java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
+                          java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
+                          if (!modelFile.exists() || !voicesFile.exists() || !tokensFile.exists() || !dataDir.exists())
+                              throw new RuntimeException("kitten voice files missing");
+                          // sherpa-onnx Android: the OfflineTts constructor takes a
+                          // nullable AssetManager. Passing null selects the
+                          // file-based native path (newFromFile), which reads the
+                          // absolute filesystem paths set above directly.
+                          // Passing getAssets() makes native code treat those
+                          // absolute paths as APK asset names, which fails.
+                          com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig kitten =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig();
+                          kitten.setModel(modelFile.getAbsolutePath());
+                          kitten.setVoices(voicesFile.getAbsolutePath());
+                          kitten.setTokens(tokensFile.getAbsolutePath());
+                          kitten.setDataDir(dataDir.getAbsolutePath());
+                          com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
+                          modelConfig.setKitten(kitten);
+                          modelConfig.setNumThreads(4);
+                          com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
+                          config.setModel(modelConfig);
+                          config.setMaxNumSentences(1);
+                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
+                          // Honest warm-up: proves synthesis actually works
+                          // (male voice 1, sid 0 — the voice you picked).
+                          // Warm-up failure throws, so a broken voice keeps
+                          // reporting its error instead of claiming "Ready".
+                          com.k2fsa.sherpa.onnx.GeneratedAudio warm =
+                              kittenTts.generate("Voice ready.", 0, 1.0f);
+                          float[] ws = warm != null ? warm.getSamples() : null;
+                          if (ws == null || ws.length == 0)
+                              throw new RuntimeException("warm-up produced no audio");
+                          kittenSpeakInfo = "warm-up OK: " + ws.length + " samples";
+                          kittenReady = true;
+                          try { errFile.delete(); } catch (Throwable ignored) {}
+                      } catch (Throwable t) {
+                          // Persist the reason so the next launch can report it
+                          // aloud instead of failing silently forever.
+                          try {
+                              java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
+                              dest.mkdirs();
+                              String msg = String.valueOf(t);
+                              if (msg.length() > 300) msg = msg.substring(0, 300);
+                              java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dest, ".last-error"));
+                              out.write(msg.getBytes("UTF-8"));
+                              out.close();
+                          } catch (Throwable ignored) {}
+                          kittenStarting = false; // let a later speak() retry
+                      }
+                  } }).start();
+              }
+              /* One utterance on a worker thread: synthesize, then play the
+                 raw samples through a serialized AudioTrack. A generation
+                 counter stops stale playback when stop() is called. */
+              private void kittenSpeakWorker(String id, String text, int gen) {
+                  try {
+                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = kittenTts.generate(text, 0, 1.0f);
+                      if (gen != kittenGen) return; // stopped while synthesizing
+                      float[] samples = audio.getSamples();
+                      int sr = audio.getSampleRate();
+                      short[] pcm = new short[samples.length];
+                      for (int i = 0; i < samples.length; i++) {
+                          float v = Math.max(-1f, Math.min(1f, samples[i]));
+                          pcm[i] = (short) (v * 32767);
+                      }
+                      int ch = android.media.AudioFormat.CHANNEL_OUT_MONO;
+                      int fmt = android.media.AudioFormat.ENCODING_PCM_16BIT;
+                      int minBuf = android.media.AudioTrack.getMinBufferSize(sr, ch, fmt);
+                      android.media.AudioTrack track = new android.media.AudioTrack(
+                          android.media.AudioManager.STREAM_MUSIC, sr, ch, fmt,
+                          Math.max(minBuf, pcm.length * 2), android.media.AudioTrack.MODE_STREAM);
+                      kittenTrack = track;
+                      kittenSpeakInfo = "played " + pcm.length + " samples @ " + sr + "Hz";
+                      track.play();
+                      int off = 0;
+                      while (off < pcm.length && gen == kittenGen) {
+                          int len = Math.min(8192, pcm.length - off);
+                          track.write(pcm, off, len);
+                          off += len;
+                      }
+                      try { track.stop(); } catch (Throwable ignored) {}
+                      try { track.release(); } catch (Throwable ignored) {}
+                      if (kittenTrack == track) kittenTrack = null;
+                      if (gen == kittenGen) jsCall("window.__onTtsDone('" + id + "')");
+                  } catch (Throwable t) {
+                      // Claimed the utterance but couldn't render it: record
+                      // the reason where Settings can show it, then advance
+                      // the queue rather than stalling it.
+                      String msg = String.valueOf(t);
+                      if (msg.length() > 300) msg = msg.substring(0, 300);
+                      kittenSpeakInfo = "speak FAILED: " + msg;
+                      try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
+                  }
+              }
+              /* Copy one asset tree into private storage, skipping files that
+                 are already there. Each file is written to a .part file and
+                 renamed, so a kill mid-copy can never leave a half file:
+                 anything present is complete, and the next launch resumes
+                 where the last one stopped. */
+              private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
+                  String[] names = getAssets().list(assetPath);
+                  if (names == null) return;
+                  dest.mkdirs();
+                  for (String n : names) {
+                      String rel = assetPath.isEmpty() ? n : assetPath + "/" + n;
+                      String[] sub = getAssets().list(rel);
+                      if (sub != null && sub.length > 0) {
+                          syncAssetDir(rel, new java.io.File(dest, n));
+                      } else {
+                          java.io.File out = new java.io.File(dest, n);
+                          if (out.exists()) continue;
+                          java.io.File part = new java.io.File(dest, n + ".part");
+                          java.io.InputStream in = getAssets().open(rel);
+                          java.io.FileOutputStream fos = new java.io.FileOutputStream(part);
+                          byte[] buf = new byte[65536];
+                          int r;
+                          while ((r = in.read(buf)) > 0) fos.write(buf, 0, r);
+                          fos.close();
+                          in.close();
+                          if (!part.renameTo(out)) {
+                              java.io.FileInputStream fin = new java.io.FileInputStream(part);
+                              java.io.FileOutputStream fout = new java.io.FileOutputStream(out);
+                              byte[] b2 = new byte[65536];
+                              int r2;
+                              while ((r2 = fin.read(b2)) > 0) fout.write(b2, 0, r2);
+                              fout.close();
+                              fin.close();
+                              part.delete();
+                          }
+                      }
+                  }
+              }
+
               private void installApk(java.io.File apk) {
                   // Hand the downloaded APK to the system package installer.
                   // First run per app: Android takes the user to grant
@@ -410,14 +613,11 @@ jobs:
                                       tts.setSpeechRate(0.85f);
                                       // A touch lower than default pitch reads warmer, less robotic.
                                       tts.setPitch(0.93f);
-                                      // v3.0: the user's saved voice choice wins over the auto-pick.
-                                      String savedVoice = null;
-                                      try { savedVoice = getSharedPreferences("weather_realtime", MODE_PRIVATE).getString("tts_voice", null); } catch (Exception ignored3) {}
-                                      final String savedVoiceFinal = savedVoice;
-                                      boolean haveVoice = savedVoice != null && applyVoiceName(savedVoice);
-                                      if (!haveVoice) pickBestTtsVoice();
-                                      // The voice list can load late — re-apply once it arrives.
-                                      try { new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { if (savedVoiceFinal != null) applyVoiceName(savedVoiceFinal); else pickBestTtsVoice(); } }, 3000); } catch (Exception ignored2) {}
+                                      // The device voice only speaks one emergency sentence if the
+                                      // AI voice fails to load: always pick the best English voice.
+                                      pickBestTtsVoice();
+                                      // The voice list can load late — re-pick once it arrives.
+                                      try { new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() { pickBestTtsVoice(); } }, 3000); } catch (Exception ignored2) {}
                                       tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                                           @Override public void onStart(String utteranceId) {}
                                           @Override public void onDone(String utteranceId) { ttsDoneCallback(utteranceId); }
@@ -433,21 +633,6 @@ jobs:
                           }
                       }
                   }, engine);
-              }
-              /* Apply a saved voice by name. Returns true if it matched. */
-              private boolean applyVoiceName(String name) {
-                  try {
-                      if (tts == null || name == null) return false;
-                      java.util.Set<android.speech.tts.Voice> voices = tts.getVoices();
-                      if (voices == null) return false;
-                      for (android.speech.tts.Voice v : voices) {
-                          if (name.equals(v.getName())) {
-                              tts.setVoice(v);
-                              return true;
-                          }
-                      }
-                  } catch (Exception ignored) {}
-                  return false;
               }
               /* Pick the highest-quality English voice the engine offers.
                  Neural / natural / premium voices sound far more human than
@@ -482,6 +667,17 @@ jobs:
                           if (s > bestScore) { bestScore = s; best = v; }
                       }
                       if (best != null) { try { tts.setVoice(best); } catch (Exception ignored) {} }
+                  } catch (Exception ignored) {}
+              }
+              private void jsCall(final String expr) {
+                  try {
+                      final WebView wv = webView;
+                      if (wv == null) return;
+                      wv.post(new Runnable() {
+                          @Override public void run() {
+                              try { wv.evaluateJavascript(expr, null); } catch (Exception ignored) {}
+                          }
+                      });
                   } catch (Exception ignored) {}
               }
               private String doTtsSpeak(String text) {
@@ -541,6 +737,27 @@ jobs:
               }
           }
           EOF
+
+      - name: Fetch Kitten voice model (on-device AI voice)
+        run: |
+          mkdir -p app/src/main/assets/kitten-voice
+          cd app/src/main/assets/kitten-voice
+          # KittenTTS Micro, English (Apache 2.0, free to bundle): ~40MB model +
+          # 3.2MB voices + the English espeak-ng data (trimmed, tested).
+          curl -fSL --retry 3 -o kitten.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-micro-en-v0_8.tar.bz2"
+          tar xf kitten.tar.bz2
+          mv kitten-micro-en-v0_8/* .
+          rm -rf kitten-micro-en-v0_8 kitten.tar.bz2
+          # Keep only the English espeak-ng data: synthesis was tested this way.
+          mkdir -p /tmp/espeak-trim/lang/gmw
+          D=espeak-ng-data
+          cp "$D/en_dict" "$D/phondata" "$D/phondata-manifest" "$D/phonindex" "$D/phontab" "$D/intonations" /tmp/espeak-trim/
+          cp "$D/lang/gmw/en-US" "$D/lang/gmw/en" /tmp/espeak-trim/lang/gmw/
+          rm -rf espeak-ng-data
+          mv /tmp/espeak-trim espeak-ng-data
+          ls -la
+          du -sh .
+          test -f model.onnx && test -f voices.bin && test -f tokens.txt && test -d espeak-ng-data
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
