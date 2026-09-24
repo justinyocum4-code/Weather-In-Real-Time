@@ -889,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.18";
-const WRT_VERSION_CODE = 76;
+const WRT_VERSION = "3.9.19";
+const WRT_VERSION_CODE = 77;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1314,7 +1314,10 @@ function initMap() {
     queueSpeech("Map library failed to load. Alerts will still be voiced.", 800);
     return;
   }
-  map = L.map("radar-map", { keyboard: false, zoomControl: false, attributionControl: false });
+  map = L.map("radar-map", { keyboard: false, zoomControl: false, attributionControl: false,
+    // Tiles pop in fully opaque instead of cross-fading: on low-power TV
+    // sticks the per-frame fade compositing reads as blotches mid-pan.
+    fadeAnimation: false });
   if (userLoc) map.setView([userLoc.lat, userLoc.lon], 7);
   else map.setView([39.8, -98.5], 4);
   document.getElementById("radar-map").setAttribute("tabindex", "-1");
@@ -1658,6 +1661,10 @@ function startIdleDrift() {
    The radar flies there first, then the full warning is narrated — the voice
    always describes exactly what the radar is showing. */
 let tourIndex = 0, nearTourIndex = 0;
+/* Alerts the tour has already read out loud. The tour covers each active
+   alert exactly once, then rests — it never loops back over the same
+   reports. Expired alerts are forgotten so a re-issued alert reads again. */
+const tourSpokenIds = new Set();
 function scheduleTourNext() {
   if (presenter.busy || presenter.queue.length) return;
   if (!map || !currentFeatures.length) return;
@@ -1665,8 +1672,9 @@ function scheduleTourNext() {
   try {
     const feats = [...currentFeatures]
       .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
-      .slice(0, 12);
-    if (!feats.length) return;
+      .slice(0, 12)
+      .filter(f => !tourSpokenIds.has(f.id));
+    if (!feats.length) return; // every active alert has been read — rest
     // A storm within 25 miles of the listener owns the tour: stay on it
     // instead of wandering the country.
     let f = feats[tourIndex % feats.length];
@@ -1688,6 +1696,7 @@ function scheduleTourNext() {
     } else {
       tourIndex++;
     }
+    tourSpokenIds.add(f.id);
     const tp = f.properties || {};
     const c = alertCentroid(f);
     // Threat banner follows the tour — like YallBot's stream title.
@@ -1851,22 +1860,11 @@ function severityColor(p) {
   return "#888888";
 }
 
-/* Nicknames for the listener — YallBot gives its regulars nicknames. Used
-   sparingly in check-ins and openers, never inside a warning. */
-const nextNickname = cycler([
-  "chief", "boss", "partner", "my friend", "slugger", "amigo", "pal", "cap'n",
-]);
 
-/* "Why you're hearing this" — YallBot's WHY THIS IS AIRING lower third,
-   spoken out loud. RARE by design: only for genuine emergencies, at most
-   once every few minutes, with varied wording, and never twice the same way.
-   The tour and recaps never use it — it only fires on new emergency alerts. */
+/* "Why you're hearing this" — spoken out loud, RARE by design: only for
+   genuine emergencies, at most once every few minutes. The tour and recaps
+   never use it — it only fires on new emergency alerts. */
 let lastWhySpokenAt = 0;
-const nextWhyTornado = cycler([
-  "jumping the queue for this one,",
-  "breaking in for this one,",
-  "cutting straight to this one,",
-]);
 function whyThisAirs(p) {
   try {
     const now = Date.now();
@@ -1876,11 +1874,11 @@ function whyThisAirs(p) {
     let line = "";
     if (/tornado/.test(ev) && typeof tornadoThreat === "function" &&
         tornadoThreat(p) === "a confirmed tornado")
-      line = nextWhyTornado() + " " + nextNickname() + " — a confirmed tornado jumps every queue I've got.";
+      line = "Breaking in. Confirmed tornado on the ground.";
     else if (/tornado/.test(ev))
-      line = nextWhyTornado() + " tornado warnings go straight to the top. No waiting in line.";
+      line = "Breaking in. Tornado warning.";
     else if (/flash flood emergency/.test(ev) || /particularly dangerous situation/.test(desc))
-      line = "flagging this one specially — the weather service called it particularly dangerous.";
+      line = "Flagging this one specially. The weather service called it particularly dangerous.";
     if (line) { lastWhySpokenAt = now; return line; }
   } catch (e) {}
   return "";
@@ -1916,47 +1914,11 @@ const nextOpener = cycler([
   "Heads up,",
   "Quick update,",
   "Just in,",
-  "Keeping an eye on this one,",
-  "Wanted you to know,",
-  "Still watching this,",
-  "Alright y'all,",
-  "Okay, listen,",
-  "Folks,",
-  "Breaking in,",
-  "Well, would you look at that,",
   "New development,",
-  "Here we go again,",
-  "Mother Nature's at it again,",
-  "Spicy one coming in,",
-  "Plot twist,",
-  "Buckle up,",
-  "The atmosphere's cooking up something,",
-  "Radar's got something to say,",
   "Fresh off the wire,",
-  "Heads on a swivel,",
-  "Story's developing,",
-  "Oh boy, here comes another one,",
-  "Y'all ready for this,",
-  "Coming in hot,",
-  "Eyes up,",
-  "No rest for the wicked,",
-  "The sky's got jokes today,",
-  "Sit tight,",
-  "Gather round,",
-  "Storm tracker's log,",
-  "Weather desk update,",
-  "Y'all,",
-  "Okay, real talk,",
-  "Listen up,",
-  "No sugarcoating this one,",
-  "Straight from the weather desk,",
-  "Hot off the radar,",
-  "Your weather-obsessed friend here,",
-  "Me again, with sky news,",
-  "The sky's up to something,",
-  "Plot twist from the atmosphere,",
-  "Your friendly neighborhood weather nerd here,",
-  "Breaking from the radar room,",
+  "Breaking in,",
+  "Update,",
+  "New alert,",
 ]);
 
 /* Sassy asides — the YallBot flavor. Dropped in sparingly, kept light so the
@@ -2152,108 +2114,10 @@ function svrHook(area) {
 
 /* Calm-weather personality — theatrical asides, snack jokes.
    NEVER used inside warnings. Full sarcasm allowed here. */
-const calmAside = cycler([
-  "We're tracking this live, folks. Keep an eye up.",
-  "GASPS DRAMATICALLY! Just kidding — it's calm. Had to keep you on your toes.",
-  "Quiet on the radar. I'll take it.",
-  "Slow weather day. The radar's just vibing.",
-  "I'm watching the whole country for you, y'all. Not a thing popping off right now.",
-  "All clear. Even the clouds are behaving. Suspicious, honestly.",
-  "Nothing but calm skies on the radar. Kidding aside — it's genuinely quiet.",
-  "The atmosphere's taking a nap. Let's not wake it.",
-  "I've stared at this radar so long I'm starting to see shapes. Still no storms though.",
-  "No warnings, no watches, no drama. The weather's on its best behavior.",
-  "It's so quiet out there, I'm narrating my own thoughts. This is fine.",
-  "Radar check: whole lotta nothing. Beautiful.",
-  "The sky's being suspiciously polite today.",
-  "Zero alerts nationwide. I'm as shocked as you are.",
-  "Peaceful skies. Don't worry, I'll find something to talk about.",
-  "I asked the clouds for drama and they said, new phone, who dis.",
-  "Weather update: the sky is doing absolutely nothing, and doing it beautifully.",
-  "It's quieter than a library in here. A library full of clouds.",
-  "No storms. I checked twice because I don't trust my own eyes.",
-  "The atmosphere called in calm today. Must be nice.",
-  "Breaking: nothing is happening. More at eleven. Actually, less at eleven.",
-  "I polished the radar dish out of boredom. You're welcome, science.",
-]);
 
 
-/* Clumsy presenter bits — lovable goof energy. Calm-weather chatter ONLY,
-   never inside a warning. */
-const nextClumsy = cycler([
-  "Okay, I just tripped over the radar cable. We're fine. Everything's fine.",
-  "I spilled coffee on the weather desk again. The forecast is still dry though.",
-  "Hold on, my chair just tried to escape. Anyway — all quiet out there.",
-  "I read that county name wrong three times in my head before we got here. Moving on.",
-  "Fun fact: I once walked into a doorframe during a tornado warning. True story.",
-  "I bumped the microphone. Sorry about that. Professional, I know.",
-  "My teleprompter just gave up on me. We're doing this from memory.",
-  "I tried to point at the radar and pointed at the wrong state. Classic me.",
-  "Heads up: the presenter is clumsier than the weather today.",
-  "I just sneezed during the satellite loop. Bless me.",
-  "If I mispronounce your county, take it up with my mouth, not me.",
-  "I waved at the radar and it waved back. I think we're friends now.",
-  "Dropped my pen, chased it under the desk, found three old forecasts down there.",
-  "I just said 'back to you' and there's nobody else here. Anyway, back to me.",
-  "Tripped over the radar cable. The whole country's wobbling. Sorry about that.",
-  "My notes say 'be professional.' My brain says 'tell them about the pigeon.' The pigeon won.",
-  "I rehearsed this county name in the mirror. Still botched it. Growth.",
-  "I spilled water on the forecast. The forecast is now 'damp.'",
-  "Tried to look serious pointing at the map. Pointed at my own face. Nailed it.",
-  "The autocue scrolled too fast and I just went with it. Hope that made sense.",
-]);
 
-/* Random non-weather chatter — jokes and observations between reports, like
-   YallBot riffing while nothing's happening. Calm weather ONLY. */
-const nextRandom = cycler([
-  "Quick break from the weather: I tried to make coffee and the radar judged me.",
-  "Not weather-related, but I just remembered I left my umbrella somewhere. It's fine.",
-  "Between storms, a thought: whoever named the sundog really committed to the bit.",
-  "Non-weather bulletin: my chair squeaks in D minor. Anyway.",
-  "Random thought: clouds are just sky sheep, and nobody can convince me otherwise.",
-  "In other news, I finally learned how to pronounce Mackinac. You're welcome.",
-  "Studio memo: someone — me — left the radar on spin cycle. It's mesmerizing.",
-  "Not a weather alert, just a feeling: today's a good day to drink water and mind your business.",
-  "I tried to high-five the satellite image. My hand went through the screen. Science is wild.",
-  "Reminder from your clumsy weather friend: stretch, hydrate, and don't lick frozen flagpoles.",
-  "I named one of the clouds Kevin. Kevin's doing great today.",
-  "I tried to nap during the quiet stretch. The radar tattled on me.",
-  "Somewhere, someone just said 'looks like rain' while staring directly at rain.",
-  "Weather confession: I have a favorite cloud. Don't tell the others.",
-  "The jet stream called. It wants its drama back.",
-  "If the sky were a group chat, it'd be muted right now. Peaceful.",
-  "I just watched a tumbleweed cross the radar. Not weather. Just vibing.",
-  "Hotdog vendors across America are enjoying this calm. Respect.",
-  "Somewhere a kid is disappointed there's no thunder to be scared of. Lucky kid.",
-  "The radar's so calm I could hear a raindrop. If there were one.",
-  "If you're grilling right now, the sky approves. Carry on.",
-  "Breaking: absolutely nothing is happening, and honestly? We love that.",
-  "Somewhere out there, somebody's grill cover is about to become a kite. Stay vigilant.",
-  "Pro tip: lick your finger, hold it up, congratulations — you're a weather instrument.",
-  "No storms right now, so I'm just vibing. The radar's vibing. We're all vibing.",
-]);
 
-/* Presenter hot takes — opinions about the weather, calm moments only. */
-const nextTake = cycler([
-  "Hot take: this ridge of high pressure is just showing off at this point.",
-  "Unpopular opinion: I like a good thunderstorm. Don't tell the roof.",
-  "My take? This calm stretch is the weather apologizing for last week.",
-  "Controversial: I think sunshine is overrated. Give me dramatic clouds.",
-  "Honestly? A quiet radar is the bravest thing on television right now.",
-  "Bold prediction: the weather will continue to be weather. You heard it here first.",
-  "Hot take: fog is just a cloud that gave up on its dreams.",
-  "Unpopular opinion: wind is the sky's way of fidgeting.",
-  "Bold prediction: someone, somewhere, is complaining about this exact weather right now.",
-  "My take: sleet is nature's participation trophy. Pick rain or snow.",
-  "Controversial: a 20 percent chance of rain means it's definitely raining on somebody.",
-  "Strong opinion: the 'feels like' temperature is the only honest temperature.",
-  "Hot take: dew point is just humidity with a fancier name, and I'm tired of pretending otherwise.",
-  "Unpopular opinion: I respect a storm that commits. Go big or go home.",
-  "My take: whoever named it 'partly cloudy' was an optimist. Or a pessimist. We'll never know.",
-  "Bold prediction: the weekend forecast will change eleven times before the weekend.",
-  "Controversial: drizzle is just rain that couldn't commit.",
-  "Strong opinion: sunshine before 7 AM doesn't count. I said what I said.",
-]);
 
 /* Special Weather Statements carry their message in "* WHAT... / * IMPACTS..."
    blocks. Read the actual statement instead of just the county and state. */
@@ -2595,147 +2459,42 @@ function recapAlerts() {
   queueSpeech(text, 999, c0 ? { lat: c0.lat, lon: c0.lon, zoom: 7 } : null);
 }
 
-/* Startup: brief status only — never read warnings on open. New warnings
-   speak as they happen; the chatter recaps ongoing ones. */
-/* Startup variety: the opener and the first summary rotate through
-   different phrasings, so opening the app never sounds identical. */
-const nextStartupOpener = cycler([
-  "Weather In Real Time, starting up. Pulling the latest alerts now.",
-  "Weather In Real Time is on. Grabbing the freshest alerts for you.",
-  "Starting up Weather In Real Time. Let's see what's happening out there.",
-  "Weather In Real Time, firing up. Checking the latest alerts now.",
-  "Here we go, Weather In Real Time. Pulling in the newest alerts.",
-  "Weather In Real Time is waking up. Scanning the whole country for alerts.",
-  "Booting up Weather In Real Time. Time to see what the sky's doing.",
-  "Weather In Real Time, rolling in. Let's check the skies together.",
-  "Weather In Real Time is live. Radar's hot, let's see what we've got.",
-  "Weather In Real Time, back on the beat. What's the sky up to today?",
-  "Rise and shine — Weather In Real Time is on the air.",
-  "Weather In Real Time, locking onto the radar. Here we go.",
-  "Weather In Real Time, coming online. Fetching the latest alerts now.",
-]);
 const nextStartupClear = cycler([
-  "Weather In Real Time. All clear. No active weather alerts — the sky's on its best behavior.",
-  "Weather In Real Time. The country's quiet. No active alerts to report, so I'm just vibing with the radar.",
-  "Weather In Real Time. All quiet nationwide. Nothing to warn about — suspiciously peaceful, honestly.",
-  "Weather In Real Time. Skies are calm — zero active alerts. Enjoy it while it lasts, folks.",
-  "Weather In Real Time. Clean sweep — no alerts anywhere in the country. Even the clouds are behaving.",
-  "Weather In Real Time. All clear, coast to coast. I'll holler the second that changes — promise.",
+  "Weather In Real Time. All clear. No active weather alerts in the country right now.",
+  "Weather In Real Time. No active weather alerts to report.",
+  "Weather In Real Time. All quiet nationwide.",
 ]);
 const nextStartupAlerts = cycler([
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now. Let's get into it.",
-  (n, r) => "Weather In Real Time. Heads up — " + n + (n === 1 ? " alert" : " alerts") + " on the board" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ". Buckle up.",
-  (n, r) => "Weather In Real Time. We've got " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " to get through. The sky's got jokes today.",
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", with " + r + (r === 1 ? " storm report" : " storm reports") + " in" : "") + ". Mother Nature's in a mood.",
-  (n, r) => "Weather In Real Time. Counting " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " as we speak. Stay sharp out there.",
-  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " demanding our attention" + (r ? ", plus " + r + (r === 1 ? " fresh storm report" : " fresh storm reports") : "") + ". Eyes up, y'all.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " active alert" : " active alerts") + (r ? " and " + r + (r === 1 ? " storm report" : " storm reports") : "") + " right now.",
+  (n, r) => "Weather In Real Time. " + n + (n === 1 ? " alert" : " alerts") + " active across the country" + (r ? ", plus " + r + (r === 1 ? " storm report" : " storm reports") : "") + ".",
 ]);
+/* Startup summary: plain alert counts. No opener, no jokes. */
 function startupSummaryText() {
   const n = currentFeatures.length;
   const r = currentLsrs.length;
   if (!n && !r) return nextStartupClear();
   return nextStartupAlerts()(n, r);
 }
-/* Welcome-screen buttons still announce the summary right away. */
-function announceStartup() {
-  queueSpeech(startupSummaryText(), 999);
-}
 
-/* Radar sweep lines — one of the rotating opening segments. */
-const nextSweep = cycler([
-  "Let's take a spin around the national radar and see what's cooking out there.",
-  "Spinning up the radar for a full coast-to-coast look.",
-  "Here's the big picture on live radar right now.",
-  "Time for a lap around the country's radar — let's see what the sky's doing.",
-  "Radar's rolling. Taking the grand tour, coast to coast.",
-  "Let's go radar surfing across the whole country and see what's popping.",
-  "Radar's hot and we're going coast to coast. Let's see what Mother Nature's up to.",
-  "Full radar sweep, top to bottom. If the sky's hiding something, we'll find it.",
-  "Let's ride the radar around the whole country — no storm gets past us.",
-  "Spinning the dish for a nationwide look. This never gets old.",
-]);
 
-/* Shuffle an array in place. */
-function shuffleArr(a) {
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const t = a[i]; a[i] = a[j]; a[j] = t;
-  }
-  return a;
-}
 
-/* Chatter: keep the voice busy with periodic updates. */
+/* Chatter: periodic check-ins while alerts are active. Quiet weather stays
+   quiet — no jokes, no filler. */
 let chatterIndex = 0;
-let lastAllClear = 0;
 function chatterUpdate() {
   if (chatterMode() === "off") return;
   const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
-  if (!feats.length) {
-    // Quiet: personality lives here. Asides and all-clear with character.
-    // Speaks up every few minutes so the quiet stretches feel alive.
-    const now = Date.now();
-    if (now - lastAllClear > 5 * 60000) {
-      lastAllClear = now;
-      // Pick two DIFFERENT bits and sometimes riff them back-to-back,
-      // so the quiet stretches feel like a real presenter thinking aloud.
-      const bits = [calmAside(), nextClumsy(), nextRandom(), nextTake(), nextAllClear()];
-      const first = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
-      queueSpeech(first, 60);
-      if (Math.random() < 0.3) {
-        const second = bits.splice(Math.floor(Math.random() * bits.length), 1)[0];
-        queueSpeech(second, 59);
-      }
-    }
-    return;
-  }
+  if (!feats.length) return;
   if (chatterMode() === "chatty") {
-    // Warning check-in: refresh the current top threat like YallBot does.
+    // Warning check-in: re-read the current top threat.
     // Goes through the presenter so the radar flies there first.
     const f = feats[chatterIndex % Math.min(feats.length, 8)];
     chatterIndex++;
     const p = f.properties || {};
     const c = alertCentroid(f);
-    const checkin = Math.random() < 0.5 ? nextCheckin() + " " : "";
-    queueSpeech(checkin + buildAnnouncement(p, f), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
+    queueSpeech(buildAnnouncement(p, f), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
   }
 }
-const nextAllClear = cycler([
-  "All quiet out there, y'all. No active weather alerts in the country right now. I'm still watching — I'll holler the moment something pops up.",
-  "Radar's clean, skies are calm. Not a single alert in the whole country. Enjoy it while it lasts.",
-  "Nothing to report, folks. The entire country's behaving itself. I'll let you know the second that changes.",
-  "Zero active alerts. The weather's taking the day off, and honestly? Good for it.",
-  "The country's calm. Almost too calm. I'm watching anyway.",
-  "All clear. I'll be here staring at the radar so you don't have to.",
-  "All clear nationwide. I'm going to try not to trip over anything while we wait.",
-  "The radar's so clean you could eat off it. Don't, though.",
-  "Even the clouds are taking a nap.",
-  "It's suspiciously peaceful. I'm watching anyway.",
-  "Zero alerts, zero drama, one happy weather nerd.",
-  "Nothing happening anywhere. I double-checked so you don't have to trust my coordination.",
-]);
-const nextCheckin = cycler([
-  "Checking back in.",
-  "Still on this one.",
-  "Quick check-in.",
-  "Update on this.",
-  "Still watching.",
-  "Keeping tabs on this one.",
-  "Back to this storm.",
-  "Situation update.",
-  "Still tracking this.",
-  "Circling back to this one.",
-  "Still here, still clumsy, still watching.",
-  "Quick check-in — I didn't break anything this time.",
-  "Still babysitting this storm.",
-  "This one's still on my screen.",
-  "Haven't taken my eyes off it.",
-  "Still in the crosshairs.",
-  "Keeping it on the front burner.",
-  "Still on this one, chief.",
-  "Back to this storm, boss.",
-  "Keeping tabs on this one, partner.",
-  "This one's still mine, pal. Not going anywhere.",
-]);
 function chatterMode() { return store.get("chatter", "chatty"); }
 
 /* ============ Alerts polling ============ */
@@ -3207,7 +2966,6 @@ function computeWIS() {
 const _wisQuiet = cycler([
   "Pretty quiet across the country right now.",
   "Barely a blip on the national radar.",
-  "So quiet you could hear a raindrop.",
   "The whole country's on its best behavior.",
 ]);
 const _wisActive = cycler([
@@ -3219,17 +2977,13 @@ const _wisActive = cycler([
 ]);
 const _wisHeating = cycler([
   "It's heating up nationwide.",
-  "The country's getting rowdy, weather-wise.",
   "Plenty of action on the national map right now.",
-  "Strap in, it's a busy one.",
   "The radar's earning its keep today.",
 ]);
 const _wisPopping = cycler([
-  "It's popping off out there, stay weather-aware.",
   "The whole country's lit up. Keep your eyes open.",
   "Serious weather day nationwide. Stay sharp, y'all.",
   "All hands on deck, weather-wise.",
-  "This is a popcorn-and-radar kind of day.",
 ]);
 function wisFlavor(score) {
   if (score < 50) return _wisQuiet();
@@ -3250,28 +3004,6 @@ function wisText() {
   return nextOpener() + " national weather intensity score is " + score + ". " + wisFlavor(score);
 }
 
-/* Storm reports with personality — like a friend telling you what just came in,
-   not a dispatcher reading a log. */
-const nextVibe = cycler([
-  "Oh, we've got a report coming in.",
-  "Okay, listen to this one.",
-  "New report just landed.",
-  "Wow, okay, check this out.",
-  "Somebody just called this in.",
-  "Fresh report, hot off the radio.",
-  "The spotters are talking. Here's what they're saying.",
-  "Incoming. Somebody saw something.",
-  "This just came across the wire.",
-  "Eyes on the ground are reporting.",
-  "Oh, this is interesting.",
-  "The wire's buzzing again.",
-  "Somebody saw some stuff.",
-  "Hot mic, hot report.",
-  "The weather radio's earning its keep today.",
-  "Dispatch just lit up.",
-  "Another one for the logbook.",
-  "We've got boots-on-the-ground intel.",
-]);
 
 /* Random pick from a list — for varied reactions. */
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
@@ -3338,7 +3070,7 @@ function onNewStormReport(f) {
     else if (/wind|gust/.test(type)) mag += " mile an hour";
   }
   const remark = p.remark ? " " + p.remark : "";
-  let text = nextOpener() + " " + nextVibe() + " " + type + mag +
+  let text = "Storm report. " + type + mag +
     (city ? " over in " + city : "") +
     (county ? ", " + county + " County" : "") +
     (state ? ", " + state : "") + ". ";
@@ -3385,7 +3117,7 @@ function processAlerts(features) {
   firstAlertPollDone = true;
   // Forget expired alerts so a re-issued alert counts as new.
   for (const id of [...seenAlertIds]) {
-    if (!liveIds.has(id)) seenAlertIds.delete(id);
+    if (!liveIds.has(id)) { seenAlertIds.delete(id); tourSpokenIds.delete(id); }
   }
   if (!silentFirst && newOnes.length) {
     newOnes.sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
@@ -3397,6 +3129,7 @@ function processAlerts(features) {
 }
 
 function onNewAlert(f) {
+  tourSpokenIds.add(f.id);
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
@@ -4012,21 +3745,25 @@ if (!store.get("lat", "") || !store.get("lon", "")) {
       queueSpeech("Quick heads up — " + report + " If it happens again, tell me exactly what you were doing.", 800);
     }
   } catch (e) {}
-  // Speak right away on first open — the alert counts follow when the feed lands.
-  // The opener rotates through different phrasings so it never sounds identical.
-  queueSpeech(nextStartupOpener(), 800);
+  // Straight to the weather on open: alert summary, then the top alerts
+  // themselves, then the national intensity score and the SPC outlook.
+  // No opener and no jokes — the reports start immediately.
   pollAlerts().then(async () => {
-    // Opening segments in random order — never the same show twice, and the
-    // storm outlook no longer leads by default. Equal scores keep the
-    // shuffled order (the presenter only re-sorts on score).
-    const segments = [startupSummaryText()];
+    queueSpeech(startupSummaryText(), 800);
+    const topFeats = [...currentFeatures]
+      .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
+      .filter(f => !tourSpokenIds.has(f.id)) // the tour may have grabbed #1 already
+      .slice(0, 5);
+    for (const f of topFeats) {
+      const p = f.properties || {};
+      const c = alertCentroid(f);
+      tourSpokenIds.add(f.id);
+      queueSpeech(buildAnnouncement(p, f), 800, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
+    }
     const wis = wisText();
-    if (wis) segments.push(wis);
-    segments.push(nextSweep());
+    if (wis) queueSpeech(wis, 800);
     const spc = await spcOutlookText();
-    if (spc) segments.push(spc);
-    shuffleArr(segments);
-    for (const text of segments) queueSpeech(text, 800);
+    if (spc) queueSpeech(spc, 800);
   });
   // Traffic hazards near you — silent until the TomTom key has traffic access.
   pollTraffic();
