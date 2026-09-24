@@ -684,7 +684,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #fff;
     font-family: system-ui, -apple-system, sans-serif; overflow: hidden; }
   #weather-realtime-app { position: fixed; inset: 0; }
-  #radar-map { position: absolute; inset: 0; background: #000; z-index: 1; }
+  #radar-map { position: absolute; inset: 0; background: #0a1622; z-index: 1; }
   .leaflet-container { background: #000; font-family: inherit; }
   /* YallBot-style high-tech glow on the radar tiles */
   .leaflet-tile-pane .radar-frame {
@@ -778,8 +778,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   /* TV mode: bigger text and touch targets for couch distance */
   body.tv-mode #top-bar h1 { font-size: 30px; }
   body.tv-mode #top-bar { font-size: 22px; padding: 16px; }
-  body.tv-mode #controls { gap: 14px; padding: 18px; }
-  body.tv-mode #controls button { font-size: 22px; padding: 20px 28px; min-height: 76px; }
+  body.tv-mode #controls { display: none; } /* TV: the D-pad side menu replaces the bottom buttons */
   body.tv-mode .panel { padding: 24px; }
   body.tv-mode .panel h2 { font-size: 30px; }
   body.tv-mode .panel button.big { font-size: 22px; padding: 20px; }
@@ -853,14 +852,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </div>
     <div class="setting-row">
       <span>Voice</span>
-      <select id="voice-select" aria-label="Choose voice" style="max-width:60%;font-size:15px;padding:10px;border-radius:10px;border:2px solid var(--gold);background:#0a0a0a;color:var(--gold);font-weight:bold;"></select>
-    </div>
-    <div class="setting-row">
-      <span>Step through voices (TV remote friendly)</span>
-      <span>
-        <button type="button" class="toggle" id="btn-voice-prev" style="min-width:90px;">&#9664; Prev</button>
-        <button type="button" class="toggle" id="btn-voice-next" style="min-width:90px;">Next &#9654;</button>
-      </span>
+      <span style="text-align:right;"><span id="voice-status" style="font-weight:bold;">Setting up…</span><br><span id="voice-detail" style="font-size:12px;color:#999;">—</span></span>
     </div>
     <div class="setting-row">
       <span>Background music</span>
@@ -897,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.8.0";
-const WRT_VERSION_CODE = 55;
+const WRT_VERSION = "3.9.0";
+const WRT_VERSION_CODE = 56;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -954,29 +946,30 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
-/* The voice: the device's built-in text-to-speech (the original voice).
-   The native side picks the best US English voice available and speaks
-   through it. Returns the native utterance id, which the native side
-   reports back via window.__onTtsDone when it finishes. */
+/* The voice: Kitten, the on-device AI voice (male voice 1), served through
+   the native KittenVoice bridge. Returns our speaker id; the native side
+   reports its own utterance id back via window.__onTtsDone and we map it.
+   Null means Kitten isn't warmed up yet — the presenter waits and retries
+   instead of dropping the utterance. There are no fallback voices. */
+let utteranceSeq = 0;
+const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
   text = expandStates(text);
   voice.lastSpoken = text;
+  const id = "s" + (++utteranceSeq);
   try {
-    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
-      const pid = LynxosTts.speak(text);
-      if (pid) return pid;
+    if (typeof KittenVoice !== "undefined" && KittenVoice.speak) {
+      const pid = KittenVoice.speak(text);
+      if (pid) { pvIdMap[pid] = id; return id; }
     }
   } catch (e) {}
-  // Device TTS still warming up: the native side queued this utterance and
-  // will speak it as soon as init finishes. Null tells the presenter to
-  // treat it as in-flight rather than dropping it.
   return null;
 }
 
 
 
 function ttsStop() {
-  try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
+  try { if (typeof KittenVoice !== "undefined" && KittenVoice.stop) KittenVoice.stop(); } catch (e) {}
 }
 
 /* ============ Presenter: ONE queue drives the map AND the voice together.
@@ -1029,6 +1022,14 @@ const presenter = {
 
   pump() {
     if (this.busy || !this.queue.length || !voice.enabled) return;
+    // Kitten is the only voice: never drop narration while it is warming
+    // up. Wait and retry so the startup report still speaks once ready.
+    try {
+      if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady()) {
+        setTimeout(() => this.pump(), 2000);
+        return;
+      }
+    } catch (e) {}
     this.busy = true;
     const item = this.queue.shift();
     this.currentItem = item;
@@ -1039,15 +1040,16 @@ const presenter = {
       musicDuck(true); // dip the music bed while the voice reports
       const id = ttsSpeak(item.text);
       if (!id) {
-        // Device TTS still warming up: the native side queued this utterance
-        // and will speak it once init finishes. Treat it as in-flight — the
-        // finish callback (or the fallback timer) advances the queue, so the
-        // startup report is never dropped.
-        this.currentId = null;
-        const ms = Math.min(240000, Math.max(20000, item.text.length * 200));
-        if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
-        this.fallbackTimer = setTimeout(() => this.next(), ms);
-        return;
+        // Kitten still warming up: put the item back and wait — never skip.
+        try {
+          if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady()) {
+            this.queue.unshift(item);
+            this.busy = false;
+            setTimeout(() => this.pump(), 2000);
+            return;
+          }
+        } catch (e) {}
+        this.next(); return;
       }
       this.currentId = id;
       // Fallback: advance when the speech should be done, in case the
@@ -1098,8 +1100,11 @@ window.addEventListener("error", (e) => {
   } catch (err) {}
 });
 
-/* Native TTS finished-callback target. */
-window.__onTtsDone = function (id) {
+/* Native TTS finished-callback target. The id arriving here is the native
+   utterance id — map it back to our speaker id before handing it over. */
+window.__onTtsDone = function (pid) {
+  const id = pvIdMap[pid] || pid;
+  try { delete pvIdMap[pid]; } catch (e) {}
   presenter.onUtteranceDone(id);
 };
 
@@ -1248,12 +1253,35 @@ let userState = null;
 function updateLocStatus() {
   const el = document.getElementById("loc-status");
   el.textContent = userLoc
-    ? "Set: " + userLoc.lat.toFixed(2) + ", " + userLoc.lon.toFixed(2) + (userState ? " (" + userState + ")" : "")
+    ? "Set: " + userLoc.lat.toFixed(2) + ", " + userLoc.lon.toFixed(2) + (userState ? " (" + userState + ")" : "") + (userLoc.approx ? " (approx)" : "")
     : "Location not set";
 }
 
 function requestLocation(done) {
-  if (!navigator.geolocation) { if (done) done(false); return; }
+  const finish = (ok, approx) => { if (done) done(ok, approx); };
+  const ipFallback = () => {
+    // TV boxes and some devices have no GPS: fall back to an IP-based
+    // approximate location (free, no key) so Set Location still works.
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 10000);
+      fetch("https://ipapi.co/json/", { signal: ctl.signal })
+        .then((r) => r.json())
+        .then((d) => {
+          clearTimeout(t);
+          if (d && isFinite(d.latitude) && isFinite(d.longitude)) {
+            userLoc = { lat: +d.latitude, lon: +d.longitude, approx: true };
+            store.set("lat", userLoc.lat);
+            store.set("lon", userLoc.lon);
+            if (d.region_code) { userState = d.region_code; store.set("state", userState); }
+            updateLocStatus();
+            finish(true, true);
+          } else finish(false);
+        })
+        .catch(() => { clearTimeout(t); finish(false); });
+    } catch (e) { finish(false); }
+  };
+  if (!navigator.geolocation) { ipFallback(); return; }
   navigator.geolocation.getCurrentPosition(
     (pos) => {
       userLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
@@ -1270,9 +1298,9 @@ function requestLocation(done) {
           } catch (e) {}
         })
         .catch(() => {});
-      if (done) done(true);
+      finish(true, false);
     },
-    () => { if (done) done(false); },
+    () => ipFallback(),
     { timeout: 12000, maximumAge: 600000 }
   );
 }
@@ -1293,10 +1321,12 @@ function initMap() {
   // Satellite imagery base (the TV-weather look) with city labels on top,
   // so the map looks like real earth instead of a cartoon.
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-    maxZoom: 12, attribution: "Imagery: Esri World Imagery"
+    maxZoom: 12, attribution: "Imagery: Esri World Imagery",
+    keepBuffer: 6, updateWhenIdle: false
   }).addTo(map);
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", {
-    maxZoom: 12, zIndex: 20
+    maxZoom: 12, zIndex: 20,
+    keepBuffer: 6, updateWhenIdle: false
   }).addTo(map);
   alertPolyLayer = L.layerGroup().addTo(map);
   loadRadar();
@@ -2732,8 +2762,17 @@ async function pollAlerts() {
 }
 
 /* Local Storm Reports: real reports from trained spotters, law enforcement,
-   emergency management, and the public. Updated as they're filed. */
+   emergency management, and the public. Updated as they're filed. Seen
+   report IDs persist across launches so a restart never re-announces the
+   same reports; the stored list is capped so it can't grow forever. */
 const seenLsrIds = new Set();
+try {
+  const savedLsr = JSON.parse(store.get("lsr_seen", "[]") || "[]");
+  if (Array.isArray(savedLsr)) for (const id of savedLsr.slice(-500)) seenLsrIds.add(String(id));
+} catch (e) {}
+function saveLsrSeen() {
+  try { store.set("lsr_seen", JSON.stringify([...seenLsrIds].slice(-500))); } catch (e) {}
+}
 let currentLsrs = [];
 let lsrLayer = null;
 
@@ -2807,14 +2846,28 @@ async function pollStormReports() {
     currentLsrs = feats;
     renderNational();
     drawStormReportIcons(feats);
+    // Narrate only fresh reports (last ~90 minutes), newest first, capped
+    // per poll so a big batch can't flood the voice queue. Older or
+    // location-less unseen reports are still marked seen so they are never
+    // announced late or retried.
+    const freshCutoff = Date.now() - 90 * 60 * 1000;
+    const fresh = [];
     for (const f of feats) {
       const p = f.properties || {};
       const id = (p.valid || "") + "|" + (p.type || "") + "|" + (p.city || "") + "|" + (p.magnitude || "");
-      if (!seenLsrIds.has(id)) {
-        seenLsrIds.add(id);
-        onNewStormReport(f);
-      }
+      if (seenLsrIds.has(id)) continue;
+      seenLsrIds.add(id);
+      const city = String(p.city || "");
+      const hasLoc = (city && !/unknown/i.test(city)) || p.county || p.state;
+      if (!hasLoc) continue;
+      let vt = NaN;
+      try { vt = new Date(p.valid).getTime(); } catch (e) {}
+      if (isNaN(vt) || vt < freshCutoff) continue;
+      fresh.push({ f: f, vt: vt });
     }
+    saveLsrSeen();
+    fresh.sort((a, b) => b.vt - a.vt);
+    for (const item of fresh.slice(0, 3)) onNewStormReport(item.f);
   } catch (e) {}
 }
 
@@ -3290,7 +3343,11 @@ function onNewStormReport(f) {
     (county ? ", " + county + " County" : "") +
     (state ? ", " + state : "") + ". ";
   // How far it is from the listener — the detail that makes it real.
-  const plat = parseFloat(p.lat), plon = parseFloat(p.lon);
+  let plat = parseFloat(p.lat), plon = parseFloat(p.lon);
+  if (!isFinite(plat) || !isFinite(plon)) {
+    const gc = f.geometry && f.geometry.coordinates;
+    if (gc && gc.length >= 2) { plon = parseFloat(gc[0]); plat = parseFloat(gc[1]); }
+  }
   // Texas-only: no mileage on reports from other states.
   if (userLoc && isFinite(plat) && isFinite(plon) && isTexasPoint(plat, plon)) {
     text += "That's about " + Math.round(distanceMiles(userLoc.lat, userLoc.lon, plat, plon)) +
@@ -3725,6 +3782,20 @@ document.getElementById("tgl-tvmode").addEventListener("click", () => {
   applyTvMode();
   queueSpeech(on ? "TV mode on. Text and buttons are larger." : "TV mode off.", 999);
 });
+/* Auto-detect TV hardware: on Android TV / Google TV / Fire TV the bottom
+   button bar is hidden and the D-pad side menu is the way around. Only
+   kicks in when the user has never touched the TV-mode toggle themselves. */
+(function autoTvMode() {
+  try {
+    if (store.get("tv_mode", null) !== null) return;
+    const ua = navigator.userAgent || "";
+    if (/(Android TV|GoogleTV|Fire TV|AFT|SmartTV|HbbTV)/i.test(ua)) {
+      store.set("tv_mode", "1");
+      applyTvMode();
+      queueSpeech("TV mode on.", 60);
+    }
+  } catch (e) {}
+})();
 applyTvMode();
 
 /* Native back-button handshake: the app tells Android whether a menu or
@@ -3783,80 +3854,65 @@ document.getElementById("tgl-traffic").addEventListener("click", () => {
 
 document.getElementById("btn-relocate").addEventListener("click", () => {
   queueSpeech("Getting your location.", 999);
-  requestLocation((ok) => {
-    queueSpeech(ok ? "Location set." : "Could not get your location.", 999);
+  requestLocation((ok, approx) => {
+    queueSpeech(!ok ? "Could not get your location."
+      : (approx ? "Location set, approximate." : "Location set."), 999);
   });
 });
 
-/* Voice picker: lists the device's English TTS voices so you can choose the
-   one you like best. The choice is saved on the device and used from then on. */
-function prettyVoiceName(v) {
-  let n = String(v.name || "Voice");
-  n = n.replace(/en[-_]?us[-_]?/gi, "").replace(/language/gi, "").replace(/[-_]+/g, " ").trim();
-  if (!n) n = "English voice";
-  n = n.charAt(0).toUpperCase() + n.slice(1);
-  if (v.network) n += " (online)";
-  return n;
-}
-/* Voice list cache, shared by the dropdown and the TV-friendly Prev/Next
-   stepper buttons (a <select> popup is not D-pad navigable on Fire TV). */
-let voiceCache = [];
-function applyVoiceByName(name, speakSample) {
+/* Kitten voice status in Settings: Ready, Setting up, or the failure
+   reason. Updated every few seconds. */
+function updateVoiceStatus() {
+  const el = document.getElementById("voice-status");
+  if (!el) return;
   try {
-    store.set("tts_voice", name);
-    if (typeof LynxosTts !== "undefined" && LynxosTts.setVoiceName) LynxosTts.setVoiceName(name);
-    const sel = document.getElementById("voice-select");
-    if (sel) sel.value = name;
+    const det = document.getElementById("voice-detail");
+    if (det && typeof KittenVoice !== "undefined" && KittenVoice.getLastSpeakInfo) {
+      const info = KittenVoice.getLastSpeakInfo() || "";
+      det.textContent = info || "\u2014";
+      det.style.color = /FAILED/.test(info) ? "#ff7f7f" : "#999";
+    }
   } catch (e) {}
-  if (speakSample) {
-    const v = voiceCache.find((x) => x.name === name);
-    queueSpeech("Voice: " + (v ? prettyVoiceName(v) : name) + ". This is how I sound now.", 999);
-  }
-}
-function cycleVoice(dir) {
-  if (!voiceCache.length) {
-    queueSpeech("Voices are still loading. Try again in a moment.", 999);
-    loadVoiceList();
-    return;
-  }
-  const cur = store.get("tts_voice", "");
-  let i = voiceCache.findIndex((v) => v.name === cur);
-  i = i < 0 ? (dir > 0 ? 0 : voiceCache.length - 1) : (i + dir + voiceCache.length) % voiceCache.length;
-  applyVoiceByName(voiceCache[i].name, true);
-}
-function loadVoiceList() {
-  const sel = document.getElementById("voice-select");
-  if (!sel) return;
   try {
-    if (typeof LynxosTts === "undefined" || !LynxosTts.getVoices) {
-      sel.innerHTML = "<option>Device default</option>";
-      return;
+    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady) {
+      if (KittenVoice.isReady()) { el.textContent = "Ready"; el.style.color = "#7fd67f"; return; }
+      const err = KittenVoice.getLastError ? KittenVoice.getLastError() : "";
+      if (err) { el.textContent = "Failed: " + err; el.style.color = "#ff7f7f"; return; }
     }
-    let voices = [];
-    try { voices = JSON.parse(LynxosTts.getVoices() || "[]"); } catch (e) {}
-    if (!voices.length) {
-      // The voice list can load a moment after TTS init — try once more.
-      setTimeout(loadVoiceList, 2500);
-      sel.innerHTML = "<option>Loading voices…</option>";
-      return;
-    }
-    const saved = store.get("tts_voice", "");
-    sel.innerHTML = "";
-    voiceCache = voices.slice();
-    voices.forEach((v) => {
-      const o = document.createElement("option");
-      o.value = v.name;
-      o.textContent = prettyVoiceName(v);
-      if (v.name === saved) o.selected = true;
-      sel.appendChild(o);
-    });
   } catch (e) {}
+  el.textContent = "Setting up\u2026";
+  el.style.color = "#ffd97f";
 }
-document.getElementById("voice-select").addEventListener("change", (e) => {
-  applyVoiceByName(e.target.value, true);
-});
-document.getElementById("btn-voice-prev").addEventListener("click", () => cycleVoice(-1));
-document.getElementById("btn-voice-next").addEventListener("click", () => cycleVoice(1));
+setInterval(updateVoiceStatus, 5000);
+updateVoiceStatus();
+
+/* Announce once, out loud, the moment the new voice takes over. */
+let kittenReadyAnnounced = false;
+setInterval(() => {
+  if (kittenReadyAnnounced) return;
+  try {
+    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && KittenVoice.isReady()) {
+      kittenReadyAnnounced = true;
+      queueSpeech("The new voice is ready.", 60);
+    }
+  } catch (e) {}
+}, 3000);
+
+/* If Kitten never becomes ready, say so out loud once via the device voice
+   so a silent failure can never go unnoticed. This is the only thing the
+   old device voice is ever used for now. */
+let kittenFailAnnounced = false;
+setInterval(() => {
+  if (kittenFailAnnounced) return;
+  try {
+    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady() &&
+        KittenVoice.getLastError && KittenVoice.getLastError()) {
+      kittenFailAnnounced = true;
+      const msg = "The weather voice failed to load: " + KittenVoice.getLastError();
+      if (typeof LynxosTts !== "undefined" && LynxosTts.speak) LynxosTts.speak(msg);
+    }
+  } catch (e) {}
+}, 15000);
 
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("Voice check.", 999);
@@ -3949,7 +4005,6 @@ updateLocStatus();
 tickClock();
 setInterval(tickClock, 30000);
 initMap();
-loadVoiceList();
 // No in-app location dialog anymore (v3.0): on a fresh install with no saved
 // location, make one silent geolocation request so the native Android
 // permission prompt appears on its own. If it fails, stay quiet — location
