@@ -397,6 +397,23 @@ jobs:
                           try { return kittenSpeakInfo == null ? "" : kittenSpeakInfo; }
                           catch (Throwable th) { return ""; }
                       }
+                      // Where the :voice process got to while starting the AI
+                      // voice (init-start, copy-done, constructing,
+                      // constructed, ready, or error: ...). Empty if it never
+                      // started. For Settings diagnostics.
+                      @JavascriptInterface
+                      public String getVoiceStep() {
+                          try {
+                              java.io.File f = new java.io.File(getFilesDir(), "kitten-voice/.step");
+                              if (!f.exists()) return "";
+                              java.io.FileInputStream in = new java.io.FileInputStream(f);
+                              byte[] b = new byte[(int) Math.min(f.length(), 400)];
+                              int r = in.read(b);
+                              in.close();
+                              if (r <= 0) return "";
+                              return new String(b, 0, r, "UTF-8");
+                          } catch (Throwable th) { return ""; }
+                      }
                       // Try the AI voice again (starts a fresh :voice process).
                       // Safe to tap any time: if its native code crashes again,
                       // only that process dies.
@@ -783,8 +800,12 @@ jobs:
                       try {
                           mark("init-start");
                           java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                          java.io.File marker = new java.io.File(dest, ".ready");
+                          // v2 marker: 3.9.2 ships the FULL espeak-ng-data.
+                          // If an older (trimmed) copy is on disk, wipe it
+                          // first so the complete data actually gets copied.
+                          java.io.File marker = new java.io.File(dest, ".ready-v2");
                           if (!marker.exists()) {
+                              deleteRecursive(dest);
                               syncAssetDir("kitten-voice", dest);
                               marker.createNewFile();
                           }
@@ -931,6 +952,17 @@ jobs:
                   sendDone(replyTo, seq);
               }
 
+              private void deleteRecursive(java.io.File f) {
+                  try {
+                      if (f == null || !f.exists()) return;
+                      if (f.isDirectory()) {
+                          java.io.File[] kids = f.listFiles();
+                          if (kids != null) for (java.io.File k : kids) deleteRecursive(k);
+                      }
+                      f.delete();
+                  } catch (Throwable ignored) {}
+              }
+
               private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
                   String[] names = getAssets().list(assetPath);
                   if (names == null) return;
@@ -972,18 +1004,15 @@ jobs:
           mkdir -p app/src/main/assets/kitten-voice
           cd app/src/main/assets/kitten-voice
           # KittenTTS Micro, English (Apache 2.0, free to bundle): ~40MB model +
-          # 3.2MB voices + the English espeak-ng data (trimmed, tested).
+          # 3.2MB voices + the FULL espeak-ng-data (~19MB). An earlier build
+          # shipped a trimmed English-only espeak-ng-data that was tested on
+          # desktop only; sherpa's Android espeak init is pickier, so we ship
+          # the complete data dir exactly like the official sherpa-onnx
+          # Android TTS engine does.
           curl -fSL --retry 3 -o kitten.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-micro-en-v0_8.tar.bz2"
           tar xf kitten.tar.bz2
           mv kitten-micro-en-v0_8/* .
           rm -rf kitten-micro-en-v0_8 kitten.tar.bz2
-          # Keep only the English espeak-ng data: synthesis was tested this way.
-          mkdir -p /tmp/espeak-trim/lang/gmw
-          D=espeak-ng-data
-          cp "$D/en_dict" "$D/phondata" "$D/phondata-manifest" "$D/phonindex" "$D/phontab" "$D/intonations" /tmp/espeak-trim/
-          cp "$D/lang/gmw/en-US" "$D/lang/gmw/en" /tmp/espeak-trim/lang/gmw/
-          rm -rf espeak-ng-data
-          mv /tmp/espeak-trim espeak-ng-data
           ls -la
           du -sh .
           test -f model.onnx && test -f voices.bin && test -f tokens.txt && test -d espeak-ng-data
