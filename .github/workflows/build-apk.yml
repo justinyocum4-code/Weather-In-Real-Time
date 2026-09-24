@@ -1159,6 +1159,9 @@ jobs:
               // each generate() call stays short and audio starts sooner.
               // v3.9.15: 100 chars per chunk (was 160) — smaller first
               // chunk means the first audio starts sooner on the A12.
+              // v3.9.16: hard-split any single sentence still over the limit
+              // at word boundaries, so one long sentence can never force a
+              // huge generate() call and a long silence.
               private java.util.List<String> splitSentences(String text) {
                   java.util.List<String> out = new java.util.ArrayList<String>();
                   try {
@@ -1175,7 +1178,19 @@ jobs:
                       if (cur.length() > 0) out.add(cur.toString().trim());
                   } catch (Throwable ignored) {}
                   if (out.isEmpty()) out.add(text);
-                  return out;
+                  // Hard word-boundary split for anything still oversized.
+                  java.util.List<String> hard = new java.util.ArrayList<String>();
+                  for (String c : out) {
+                      String s2 = c;
+                      while (s2.length() > 100) {
+                          int cut = s2.lastIndexOf(' ', 100);
+                          if (cut <= 0) cut = 100;
+                          hard.add(s2.substring(0, cut).trim());
+                          s2 = s2.substring(cut).trim();
+                      }
+                      if (!s2.isEmpty()) hard.add(s2);
+                  }
+                  return hard.isEmpty() ? out : hard;
               }
 
               // v3.9.15: utterance loop on the single speak thread. When an
@@ -1235,21 +1250,36 @@ jobs:
               }
 
               // v3.9.15: blocking PCM playback for the playback thread.
-              // Returns the samples actually written.
+              // v3.9.16: THE silence fix. AudioTrack.write() only QUEUES
+              // pcm into the track's buffer — it does NOT wait for the
+              // speaker to play it. The old code called stop() the instant
+              // write() returned, throwing away everything still buffered:
+              // a few seconds of voice, then silence. Now we wait until
+              // the playback head has actually reached the last frame
+              // (or a stop is requested) before stop()/release(), so every
+              // chunk is heard in full. Returns the samples written.
               private int playNow(final short[] pcm, final int sr, final int g) {
                   int ch = AudioFormat.CHANNEL_OUT_MONO;
                   int fmt = AudioFormat.ENCODING_PCM_16BIT;
                   int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
                   AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
-                      Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
+                      Math.max(minBuf * 2, pcm.length * 2), AudioTrack.MODE_STREAM);
                   track = tr;
                   int off = 0;
                   try {
                       tr.play();
                       while (off < pcm.length && g == gen) {
                           int len = Math.min(8192, pcm.length - off);
-                          tr.write(pcm, off, len);
-                          off += len;
+                          int w = tr.write(pcm, off, len);
+                          if (w <= 0) break;
+                          off += w;
+                      }
+                      // Wait for the buffered audio to actually be heard.
+                      long deadline = android.os.SystemClock.uptimeMillis()
+                          + (pcm.length * 1000L / Math.max(1, sr)) + 8000;
+                      while (g == gen && tr.getPlaybackHeadPosition() < pcm.length
+                              && android.os.SystemClock.uptimeMillis() < deadline) {
+                          try { Thread.sleep(120); } catch (InterruptedException ie) { break; }
                       }
                   } catch (Throwable ignored) {}
                   try { tr.stop(); } catch (Throwable ignored) {}
