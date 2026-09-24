@@ -799,30 +799,30 @@ jobs:
                   new Thread(new Runnable() { @Override public void run() {
                       try {
                           mark("init-start");
+                          // The JitPack AAR only exposes
+                          // OfflineTts(AssetManager, config): the native code
+                          // reads model/voices/tokens straight from APK assets.
+                          // Only espeak-ng-data must be real files, because
+                          // espeak_Initialize needs a directory path.
                           java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                          // v2 marker: 3.9.2 ships the FULL espeak-ng-data.
-                          // If an older (trimmed) copy is on disk, wipe it
-                          // first so the complete data actually gets copied.
+                          java.io.File espeakDir = new java.io.File(dest, "espeak-ng-data");
                           java.io.File marker = new java.io.File(dest, ".ready-v2");
                           if (!marker.exists()) {
                               deleteRecursive(dest);
-                              syncAssetDir("kitten-voice", dest);
+                              syncAssetDir("kitten-voice/espeak-ng-data", espeakDir);
                               marker.createNewFile();
                           }
                           mark("copy-done");
-                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
-                          java.io.File voicesFile = new java.io.File(dest, "voices.bin");
-                          java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
-                          java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
-                          if (!modelFile.exists() || !voicesFile.exists() || !tokensFile.exists() || !dataDir.isDirectory())
-                              throw new RuntimeException("kitten voice files missing after copy");
+                          if (!espeakDir.isDirectory())
+                              throw new RuntimeException("espeak data missing after copy");
                           mark("constructing");
+                          android.content.res.AssetManager am = getAssets();
                           com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig kitten =
                               new com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig();
-                          kitten.setModel(modelFile.getAbsolutePath());
-                          kitten.setVoices(voicesFile.getAbsolutePath());
-                          kitten.setTokens(tokensFile.getAbsolutePath());
-                          kitten.setDataDir(dataDir.getAbsolutePath());
+                          kitten.setModel("kitten-voice/model.onnx");
+                          kitten.setVoices("kitten-voice/voices.bin");
+                          kitten.setTokens("kitten-voice/tokens.txt");
+                          kitten.setDataDir(espeakDir.getAbsolutePath());
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
                               new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
                           modelConfig.setKitten(kitten);
@@ -831,11 +831,11 @@ jobs:
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
-                          // Use the FILE-based constructor. Do NOT pass an
-                          // AssetManager here: newFromAsset is not
-                          // exception-guarded and a null manager segfaults
-                          // the :voice process during construction.
-                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(config);
+                          // Use the ASSET-based constructor with the real
+                          // AssetManager. The JitPack AAR only exposes
+                          // OfflineTts(AssetManager, config); a null manager
+                          // segfaults the :voice process during construction.
+                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(am, config);
                           mark("constructed");
                           com.k2fsa.sherpa.onnx.GeneratedAudio warm =
                               kittenTts.generate("Voice ready.", 0, 1.0f);
