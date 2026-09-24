@@ -522,6 +522,8 @@ jobs:
                       android.content.Intent svc = new android.content.Intent(this, KittenService.class);
                       bindService(svc, voiceConn, android.content.Context.BIND_AUTO_CREATE);
                       // Watchdog: if the service never reports back, stop waiting for it.
+                      // 4 minutes: the A12's slow storage can take a while to
+                      // copy 62MB of voice files and load the 40MB model.
                       new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
                           @Override public void run() {
                               // Timeout only: the process may still be alive
@@ -529,7 +531,7 @@ jobs:
                               // MSG_READY can still revive the AI voice.
                               if (!voiceReady && !voiceDead) onVoiceDied("the voice service did not start in time", false);
                           }
-                      }, 90000);
+                      }, 240000);
                   } catch (Throwable th) {
                       onVoiceDied("could not start the voice service", true);
                   }
@@ -842,10 +844,13 @@ jobs:
                           // running the constructor, then invoke the
                           // exception-guarded file-based newFromFile native
                           // directly and stuff the pointer into its field.
+                          mark("constructing: loading model");
                           kittenTts = newOfflineTtsFromFile(config);
                           mark("constructed");
+                          mark("constructing: warming up");
                           com.k2fsa.sherpa.onnx.GeneratedAudio warm =
                               kittenTts.generate("Voice ready.", 0, 1.0f);
+                          mark("constructing: warmup done");
                           float[] ws = warm != null ? warm.getSamples() : null;
                           if (ws == null || ws.length == 0)
                               throw new RuntimeException("warm-up produced no audio");
