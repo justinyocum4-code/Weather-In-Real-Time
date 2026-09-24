@@ -889,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.23";
-const WRT_VERSION_CODE = 81;
+const WRT_VERSION = "3.9.24";
+const WRT_VERSION_CODE = 82;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1738,15 +1738,21 @@ function scheduleTourNext() {
     const tp = f.properties || {};
     const c = alertCentroid(f);
     // Threat banner follows the tour — like YallBot's stream title.
-    try {
-      const banner = document.getElementById("threat-banner");
-      if (banner) {
-        const area = formatArea(tp);
-        banner.textContent = "🔴 LIVE: " + (tp.event || "Weather alert").toUpperCase() + (area ? " — " + area : "");
-        banner.style.display = "block";
-      }
-    } catch (e) {}
+    // (The banner is also an aria-live region, so TalkBack announces it.)
+    setThreatBanner(tp);
     presenter.add(intro + buildAnnouncement(tp), c ? { lat: c.lat, lon: c.lon, zoom } : null, 60);
+  } catch (e) {}
+}
+
+/* Names the alert currently being reported in the LIVE banner. */
+function setThreatBanner(p) {
+  try {
+    const banner = document.getElementById("threat-banner");
+    if (banner) {
+      const area = formatArea(p);
+      banner.textContent = "🔴 LIVE: " + (p.event || "Weather alert").toUpperCase() + (area ? " — " + area : "");
+      banner.style.display = "block";
+    }
   } catch (e) {}
 }
 
@@ -2220,6 +2226,8 @@ function buildAnnouncement(p, f) {
     const detail = stormDetail(desc, f);
     if (detail) text += " " + detail;
     if (towns) text += " In the path: " + towns + ".";
+    const impact = extractImpact(desc);
+    if (impact) text += " " + impact;
     text += " " + nextTornadoSafety();
     if (/mobile/i.test(desc) || Math.random() < 0.4) {
       text += " Mobile homes aren't safe — get to sturdier shelter immediately.";
@@ -2274,8 +2282,18 @@ function buildAnnouncement(p, f) {
     const impacts = extractRoadImpacts(desc);
     if (impacts) text += " They're reporting " + impacts;
   }
-  if (text.length > 650) text = sentenceCut(text, 650);
+  if (text.length > 900) text = sentenceCut(text, 900);
   return fixSpokenTimes(text);
+}
+
+/* The NWS IMPACT line ("You are in a life-threatening situation...") — the
+   in-depth detail a listener needs for a tornado warning. */
+function extractImpact(desc) {
+  if (!desc) return null;
+  const m = desc.match(/^\s*IMPACT\.{0,3}\s*([^\n]+(?:\n(?![A-Z ]+\.{0,3}\s)[^\n]+)*)/im);
+  if (!m) return null;
+  const clean = m[1].replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  return clean ? clean + "." : null;
 }
 
 /* Hazards from a severe thunderstorm description, in folksy units. */
@@ -3230,6 +3248,7 @@ function onNewAlert(f) {
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
+  setThreatBanner(p); // banner + TalkBack announcement for the breaking alert
   const c = alertCentroid(f);
   const move = c ? { lat: c.lat, lon: c.lon, zoom: 8 } : null;
   const why = whyThisAirs(p);
