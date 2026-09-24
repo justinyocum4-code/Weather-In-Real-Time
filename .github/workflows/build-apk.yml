@@ -799,30 +799,33 @@ jobs:
                   new Thread(new Runnable() { @Override public void run() {
                       try {
                           mark("init-start");
-                          // The JitPack AAR only exposes
-                          // OfflineTts(AssetManager, config): the native code
-                          // reads model/voices/tokens straight from APK assets.
-                          // Only espeak-ng-data must be real files, because
-                          // espeak_Initialize needs a directory path.
+                          // Copy the full voice dir to internal storage so
+                          // the file-based native loader can read it.
                           java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                          java.io.File espeakDir = new java.io.File(dest, "espeak-ng-data");
-                          java.io.File marker = new java.io.File(dest, ".ready-v2");
+                          // v3 marker: 3.9.3 only copied espeak-ng-data (it read
+                          // the model from assets). This build needs the full
+                          // dir on disk for the file-based loader, so wipe
+                          // any older copy first.
+                          java.io.File marker = new java.io.File(dest, ".ready-v3");
                           if (!marker.exists()) {
                               deleteRecursive(dest);
-                              syncAssetDir("kitten-voice/espeak-ng-data", espeakDir);
+                              syncAssetDir("kitten-voice", dest);
                               marker.createNewFile();
                           }
                           mark("copy-done");
-                          if (!espeakDir.isDirectory())
-                              throw new RuntimeException("espeak data missing after copy");
+                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
+                          java.io.File voicesFile = new java.io.File(dest, "voices.bin");
+                          java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
+                          java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
+                          if (!modelFile.exists() || !voicesFile.exists() || !tokensFile.exists() || !dataDir.isDirectory())
+                              throw new RuntimeException("kitten voice files missing after copy");
                           mark("constructing");
-                          android.content.res.AssetManager am = getAssets();
                           com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig kitten =
                               new com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig();
-                          kitten.setModel("kitten-voice/model.onnx");
-                          kitten.setVoices("kitten-voice/voices.bin");
-                          kitten.setTokens("kitten-voice/tokens.txt");
-                          kitten.setDataDir(espeakDir.getAbsolutePath());
+                          kitten.setModel(modelFile.getAbsolutePath());
+                          kitten.setVoices(voicesFile.getAbsolutePath());
+                          kitten.setTokens(tokensFile.getAbsolutePath());
+                          kitten.setDataDir(dataDir.getAbsolutePath());
                           com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
                               new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
                           modelConfig.setKitten(kitten);
@@ -831,11 +834,15 @@ jobs:
                               new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
                           config.setModel(modelConfig);
                           config.setMaxNumSentences(1);
-                          // Use the ASSET-based constructor with the real
-                          // AssetManager. The JitPack AAR only exposes
-                          // OfflineTts(AssetManager, config); a null manager
-                          // segfaults the :voice process during construction.
-                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(am, config);
+                          // The JitPack AAR's only public constructor,
+                          // OfflineTts(AssetManager, config), runs native
+                          // code that is NOT exception-guarded: any failure
+                          // kills this :voice process ("constructing" then
+                          // silence). Bypass it: allocate the object without
+                          // running the constructor, then invoke the
+                          // exception-guarded file-based newFromFile native
+                          // directly and stuff the pointer into its field.
+                          kittenTts = newOfflineTtsFromFile(config);
                           mark("constructed");
                           com.k2fsa.sherpa.onnx.GeneratedAudio warm =
                               kittenTts.generate("Voice ready.", 0, 1.0f);
@@ -968,6 +975,35 @@ jobs:
               }
 
               private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
+
+              // Builds an OfflineTts without running its public
+              // constructor. The JitPack AAR only ships
+              // OfflineTts(AssetManager, config), whose native side is not
+              // exception-guarded and kills the process on any failure.
+              // The native newFromFile IS guarded, so we allocate the
+              // object via Unsafe, invoke newFromFile reflectively, and
+              // set its native pointer field directly.
+              private com.k2fsa.sherpa.onnx.OfflineTts newOfflineTtsFromFile(
+                      com.k2fsa.sherpa.onnx.OfflineTtsConfig config) throws Exception {
+                  Class<?> cls = Class.forName("com.k2fsa.sherpa.onnx.OfflineTts");
+                  java.lang.reflect.Field fUnsafe =
+                      Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+                  fUnsafe.setAccessible(true);
+                  Object unsafe = fUnsafe.get(null);
+                  java.lang.reflect.Method alloc =
+                      unsafe.getClass().getMethod("allocateInstance", Class.class);
+                  Object tts = alloc.invoke(unsafe, cls);
+                  java.lang.reflect.Method newFromFile = cls.getDeclaredMethod(
+                      "newFromFile",
+                      Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig"));
+                  newFromFile.setAccessible(true);
+                  long ptr = ((Long) newFromFile.invoke(null, config)).longValue();
+                  if (ptr == 0) throw new RuntimeException("newFromFile returned null pointer");
+                  java.lang.reflect.Field fPtr = cls.getDeclaredField("ptr");
+                  fPtr.setAccessible(true);
+                  fPtr.setLong(tts, ptr);
+                  return (com.k2fsa.sherpa.onnx.OfflineTts) tts;
+              }
                   String[] names = getAssets().list(assetPath);
                   if (names == null) return;
                   dest.mkdirs();
