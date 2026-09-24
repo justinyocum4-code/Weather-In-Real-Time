@@ -353,7 +353,12 @@ jobs:
                                   try {
                                       android.os.Message m = android.os.Message.obtain(null, KittenService.MSG_SPEAK);
                                       m.arg1 = ttsUtteranceSeq;
-                                      m.obj = text;
+                                      // v3.9.12: Message.obj CANNOT cross processes
+                                      // (a String there makes send() throw while
+                                      // parceling). The text rides in a Bundle.
+                                      android.os.Bundle speakB = new android.os.Bundle();
+                                      speakB.putString("text", text);
+                                      m.setData(speakB);
                                       m.replyTo = voiceReply;
                                       voiceService.send(m);
                                       lastVoiceUtteranceId = id;
@@ -539,7 +544,12 @@ jobs:
                                       jsCall("window.__onTtsDone('kv" + msg.arg1 + "')");
                                   } else if (msg.what == KittenService.MSG_STATE || msg.what == KittenService.MSG_READY) {
                                       boolean r = msg.arg1 == 1;
-                                      String err = msg.obj instanceof String ? (String) msg.obj : "";
+                                      // v3.9.12: the error arrives in a Bundle.
+                                      String err = "";
+                                      {
+                                          android.os.Bundle edb = msg.getData();
+                                          if (edb != null) err = edb.getString("error", "");
+                                      }
                                       if (r) {
                                           voiceReady = true; voiceDead = false; voiceError = "";
                                           kittenSpeakInfo = "AI voice ready";
@@ -819,6 +829,12 @@ jobs:
 
               @Override public void onCreate() {
                   super.onCreate();
+                  // v3.9.12: a previous run may have left a .destroyed
+                  // marker; a fresh service means it no longer applies.
+                  try {
+                      java.io.File oldDe = new java.io.File(getFilesDir(), "kitten-voice/.destroyed");
+                      if (oldDe.exists()) oldDe.delete();
+                  } catch (Throwable ignored) {}
                   // Foreground service: keeps the :voice process alive.
                   // Without this, Android kills the process soon after the
                   // model loads (it's a bound-only background process),
@@ -845,7 +861,12 @@ jobs:
                   // Heartbeat: write PID and timestamp every 5s so the main
                   // app can tell WHEN the :voice process died (v3.9.10 diag).
                   try {
-                      final java.io.File hb = new java.io.File(getFilesDir(), "kitten-voice/.heartbeat");
+                      // v3.9.12: make sure the directory exists first — the
+                      // first write happens immediately, before the model
+                      // copy creates the folder.
+                      final java.io.File hbDir = new java.io.File(getFilesDir(), "kitten-voice");
+                      try { hbDir.mkdirs(); } catch (Throwable ignored2) {}
+                      final java.io.File hb = new java.io.File(hbDir, ".heartbeat");
                       final int pid = android.os.Process.myPid();
                       new Thread(new Runnable() { @Override public void run() {
                           try {
@@ -992,7 +1013,13 @@ jobs:
                           switch (msg.what) {
                               case MSG_SPEAK: {
                                   final int seq = msg.arg1;
-                                  final String text = msg.obj instanceof String ? (String) msg.obj : "";
+                                  // v3.9.12: read the text from the Bundle
+                                  // (Message.obj cannot cross processes).
+                                  final String text;
+                                  {
+                                      android.os.Bundle db = msg.getData();
+                                      text = (db != null) ? db.getString("text", "") : "";
+                                  }
                                   final Messenger replyTo = msg.replyTo;
                                   if (!kittenReady || kittenTts == null || text.isEmpty()) {
                                       sendDone(replyTo, seq);
@@ -1013,7 +1040,13 @@ jobs:
                                   if (replyTo != null) {
                                       Message r = Message.obtain(null, MSG_STATE);
                                       r.arg1 = kittenReady ? 1 : 0;
-                                      r.obj = kittenReady ? null : kittenError;
+                                      // v3.9.12: the error rides in a Bundle —
+                                      // a String in obj cannot cross processes.
+                                      if (!kittenReady && kittenError != null) {
+                                          android.os.Bundle eb = new android.os.Bundle();
+                                          eb.putString("error", kittenError);
+                                          r.setData(eb);
+                                      }
                                       try { replyTo.send(r); } catch (Throwable ignored) {}
                                   }
                                   break;
