@@ -889,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.21";
-const WRT_VERSION_CODE = 79;
+const WRT_VERSION = "3.9.22";
+const WRT_VERSION_CODE = 80;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1732,6 +1732,7 @@ function scheduleTourNext() {
       tourIndex++;
     }
     tourSpokenIds.add(f.id);
+    noteNarrated(f);
     const tp = f.properties || {};
     const c = alertCentroid(f);
     // Threat banner follows the tour — like YallBot's stream title.
@@ -2487,6 +2488,7 @@ function recapAlerts() {
     return;
   }
   const top = feats.slice(0, 5);
+  for (const f of top) noteNarrated(f);
   let text = "Recap. " + feats.length + " active alerts in the United States. The most severe: ";
   text += top.map((f, i) => (i + 1) + ". " + buildAnnouncement(f.properties || {}, f)).join(" ");
   if (feats.length > 5) text += " Plus " + (feats.length - 5) + " more alerts in the list.";
@@ -2515,19 +2517,52 @@ function startupSummaryText() {
 
 /* Chatter: periodic check-ins while alerts are active. Quiet weather stays
    quiet — no jokes, no filler. */
+/* Narration memory: when each alert was last read out loud. The chatter
+   check-ins use it to rotate through different threats instead of circling
+   the same top few every few minutes. noteNarrated also marks the tour as
+   having covered the alert, so the tour never re-covers what was heard. */
+const lastNarratedAt = new Map();
+function noteNarrated(f) {
+  try {
+    if (!f || f.id == null) return;
+    lastNarratedAt.set(f.id, Date.now());
+    tourSpokenIds.add(f.id);
+    if (lastNarratedAt.size > 1500) {
+      let oldestKey = null, oldestT = Infinity;
+      for (const [k, t] of lastNarratedAt) { if (t < oldestT) { oldestT = t; oldestKey = k; } }
+      if (oldestKey !== null) lastNarratedAt.delete(oldestKey);
+    }
+  } catch (e) {}
+}
 let chatterIndex = 0;
 function chatterUpdate() {
   if (chatterMode() === "off") return;
   const feats = [...currentFeatures].sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
   if (!feats.length) return;
   if (chatterMode() === "chatty") {
-    // Warning check-in: re-read the current top threat.
+    // Variety check-in: read the most severe alert not heard in the last
+    // 45 minutes, drawn from a wider pool than the top few — so check-ins
+    // surface different active threats over time instead of circling the
+    // same ones. A continuing top threat still comes back around hourly.
     // Goes through the presenter so the radar flies there first.
-    const f = feats[chatterIndex % Math.min(feats.length, 8)];
+    const now = Date.now();
+    const QUIET_MS = 45 * 60 * 1000;
+    const pool = feats.slice(0, 24);
+    let pick = null;
+    for (const f of pool) {
+      if (now - (lastNarratedAt.get(f.id) || 0) > QUIET_MS) { pick = f; break; }
+    }
+    if (!pick) {
+      pick = pool[0];
+      for (const f of pool) {
+        if ((lastNarratedAt.get(f.id) || 0) < (lastNarratedAt.get(pick.id) || 0)) pick = f;
+      }
+    }
     chatterIndex++;
-    const p = f.properties || {};
-    const c = alertCentroid(f);
-    queueSpeech(buildAnnouncement(p, f), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
+    const p = pick.properties || {};
+    const c = alertCentroid(pick);
+    noteNarrated(pick);
+    queueSpeech(buildAnnouncement(p, pick), 60, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
   }
 }
 function chatterMode() { return store.get("chatter", "chatty"); }
@@ -3152,7 +3187,7 @@ function processAlerts(features) {
   firstAlertPollDone = true;
   // Forget expired alerts so a re-issued alert counts as new.
   for (const id of [...seenAlertIds]) {
-    if (!liveIds.has(id)) { seenAlertIds.delete(id); tourSpokenIds.delete(id); }
+    if (!liveIds.has(id)) { seenAlertIds.delete(id); tourSpokenIds.delete(id); lastNarratedAt.delete(id); }
   }
   if (!silentFirst && newOnes.length) {
     newOnes.sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}));
@@ -3165,6 +3200,7 @@ function processAlerts(features) {
 
 function onNewAlert(f) {
   tourSpokenIds.add(f.id);
+  noteNarrated(f);
   const p = f.properties || {};
   const score = scoreAlert(p);
   if (isQuietHours() && score < 70) return; // logged in the list, not spoken
@@ -3793,6 +3829,7 @@ if (!store.get("lat", "") || !store.get("lon", "")) {
       const p = f.properties || {};
       const c = alertCentroid(f);
       tourSpokenIds.add(f.id);
+      noteNarrated(f);
       queueSpeech(buildAnnouncement(p, f), 800, c ? { lat: c.lat, lon: c.lon, zoom: 7 } : null);
     }
     const wis = wisText();
