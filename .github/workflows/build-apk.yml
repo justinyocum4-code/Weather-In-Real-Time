@@ -804,18 +804,17 @@ jobs:
                           // Copy the full voice dir to internal storage so
                           // the file-based native loader can read it.
                           java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                          // v3 marker: 3.9.3 only copied espeak-ng-data (it read
-                          // the model from assets). This build needs the full
-                          // dir on disk for the file-based loader, so wipe
-                          // any older copy first.
-                          java.io.File marker = new java.io.File(dest, ".ready-v3");
+                          // v4 marker: the model changed (kitten-nano-en-v0_2-fp16
+                          // replaces kitten-micro-en-v0_8, whose voices.bin
+                          // format v1.12.40 rejects). Wipe any older copy.
+                          java.io.File marker = new java.io.File(dest, ".ready-v4");
                           if (!marker.exists()) {
                               deleteRecursive(dest);
                               syncAssetDir("kitten-voice", dest);
                               marker.createNewFile();
                           }
                           mark("copy-done");
-                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
+                          java.io.File modelFile = new java.io.File(dest, "model.fp16.onnx");
                           java.io.File voicesFile = new java.io.File(dest, "voices.bin");
                           java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
                           java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
@@ -1052,19 +1051,21 @@ jobs:
         run: |
           mkdir -p app/src/main/assets/kitten-voice
           cd app/src/main/assets/kitten-voice
-          # KittenTTS Micro, English (Apache 2.0, free to bundle): ~40MB model +
-          # 3.2MB voices + the FULL espeak-ng-data (~19MB). An earlier build
-          # shipped a trimmed English-only espeak-ng-data that was tested on
-          # desktop only; sherpa's Android espeak init is pickier, so we ship
-          # the complete data dir exactly like the official sherpa-onnx
-          # Android TTS engine does.
-          curl -fSL --retry 3 -o kitten.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-micro-en-v0_8.tar.bz2"
+          # KittenTTS Nano v0.2, English (Apache 2.0, free to bundle): ~30MB fp16
+          # model + voices + the FULL espeak-ng-data. NOTE: the newer
+          # kitten-micro-en-v0_8 tarball ships a voices.bin format
+          # (style_dim=400) that sherpa-onnx v1.12.40 rejects at native
+          # init ("style_dim[0] should be 1"), killing the :voice process
+          # with no catchable error. The nano v0.1/v0.2 format is what
+          # v1.12.40 expects (verified by loading it with pip
+          # sherpa-onnx==1.12.40 on desktop).
+          curl -fSL --retry 3 -o kitten.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kitten-nano-en-v0_2-fp16.tar.bz2"
           tar xf kitten.tar.bz2
-          mv kitten-micro-en-v0_8/* .
-          rm -rf kitten-micro-en-v0_8 kitten.tar.bz2
+          mv kitten-nano-en-v0_2-fp16/* .
+          rm -rf kitten-nano-en-v0_2-fp16 kitten.tar.bz2
           ls -la
           du -sh .
-          test -f model.onnx && test -f voices.bin && test -f tokens.txt && test -d espeak-ng-data
+          test -f model.fp16.onnx && test -f voices.bin && test -f tokens.txt && test -d espeak-ng-data
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
