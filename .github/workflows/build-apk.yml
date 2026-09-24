@@ -294,6 +294,14 @@ jobs:
                       }
                       @JavascriptInterface
                       public boolean isReady() { return ttsReady && tts != null; }
+                      /* True while the engine is actually producing audio. Some engines
+                         (Fire TV) fire the finished-callback early, so the presenter
+                         waits for real silence before starting the next report. */
+                      @JavascriptInterface
+                      public boolean isSpeaking() {
+                          try { return tts != null && tts.isSpeaking(); }
+                          catch (Exception ignored) { return false; }
+                      }
                       // Last utterance outcome in plain words, for Settings.
                       @JavascriptInterface
                       public String getLastSpeakInfo() {
