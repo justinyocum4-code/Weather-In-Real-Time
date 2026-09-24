@@ -854,10 +854,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Voice</span>
       <span style="text-align:right;"><span id="voice-status" style="font-weight:bold;">Setting up…</span><br><span id="voice-detail" style="font-size:12px;color:#999;">—</span></span>
     </div>
-    <div class="setting-row" id="voice-retry-row" style="display:none;">
-      <span>AI voice unavailable</span>
-      <button type="button" class="toggle" id="btn-retryvoice" style="min-width:140px;">Retry AI voice</button>
-    </div>
     <div class="setting-row">
       <span>Background music</span>
       <button type="button" class="toggle" id="tgl-music" aria-pressed="true">On</button>
@@ -893,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.17";
-const WRT_VERSION_CODE = 75;
+const WRT_VERSION = "3.9.18";
+const WRT_VERSION_CODE = 76;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -950,12 +946,11 @@ function expandStates(text) {
   return String(text).replace(/\b([A-Z]{2})\b/g, (m, abbr) => STATE_NAMES[abbr] || m);
 }
 
-/* The voice: Kitten, the on-device AI voice (male voice 1), served through
-   the native KittenVoice bridge. Returns our speaker id; the native side
-   reports its own utterance id back via window.__onTtsDone and we map it.
-   Null means no voice is ready yet — the presenter waits and retries
-   instead of dropping the utterance. If the AI voice can't start, the
-   bridge silently uses the device voice so the app never goes silent. */
+/* The voice: the phone's own text-to-speech voice, served through the
+   native LynxosTts bridge. Returns our speaker id; the native side reports
+   its own utterance id back via window.__onTtsDone and we map it.
+   Null means the voice isn't ready yet — the presenter waits and retries
+   instead of dropping the utterance. */
 let utteranceSeq = 0;
 const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
@@ -963,8 +958,8 @@ function ttsSpeak(text) {
   voice.lastSpoken = text;
   const id = "s" + (++utteranceSeq);
   try {
-    if (typeof KittenVoice !== "undefined" && KittenVoice.speak) {
-      const pid = KittenVoice.speak(text);
+    if (typeof LynxosTts !== "undefined" && LynxosTts.speak) {
+      const pid = LynxosTts.speak(text);
       if (pid) { pvIdMap[pid] = id; return id; }
     }
   } catch (e) {}
@@ -974,7 +969,7 @@ function ttsSpeak(text) {
 
 
 function ttsStop() {
-  try { if (typeof KittenVoice !== "undefined" && KittenVoice.stop) KittenVoice.stop(); } catch (e) {}
+  try { if (typeof LynxosTts !== "undefined" && LynxosTts.stop) LynxosTts.stop(); } catch (e) {}
 }
 
 /* ============ Presenter: ONE queue drives the map AND the voice together.
@@ -1027,10 +1022,10 @@ const presenter = {
 
   pump() {
     if (this.busy || !this.queue.length || !voice.enabled) return;
-    // Kitten is the only voice: never drop narration while it is warming
-    // up. Wait and retry so the startup report still speaks once ready.
+    // The device voice can take a moment to initialize on first launch:
+    // never drop narration while it is warming up. Wait and retry.
     try {
-      if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady()) {
+      if (typeof LynxosTts !== "undefined" && LynxosTts.isReady && !LynxosTts.isReady()) {
         setTimeout(() => this.pump(), 2000);
         return;
       }
@@ -1045,9 +1040,9 @@ const presenter = {
       musicDuck(true); // dip the music bed while the voice reports
       const id = ttsSpeak(item.text);
       if (!id) {
-        // Kitten still warming up: put the item back and wait — never skip.
+        // Device voice still warming up: put the item back and wait — never skip.
         try {
-          if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady()) {
+          if (typeof LynxosTts !== "undefined" && LynxosTts.isReady && !LynxosTts.isReady()) {
             this.queue.unshift(item);
             this.busy = false;
             setTimeout(() => this.pump(), 2000);
@@ -1057,11 +1052,10 @@ const presenter = {
         this.next(); return;
       }
       this.currentId = id;
-      // Watchdog only: the native side now reports REAL playback
-      // completion (it waits for the audio to actually finish playing),
+      // Watchdog only: the native side reports real utterance completion,
       // so this timer should essentially never fire. It exists in case
       // the finished-callback is ever lost — set far beyond any real
-      // synthesis + playback time so it can never cut a report short.
+      // speech time so it can never cut a report short.
       const ms = Math.min(600000, Math.max(45000, item.text.length * 800));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
       this.fallbackTimer = setTimeout(() => this.next(), ms);
@@ -3866,38 +3860,24 @@ document.getElementById("btn-relocate").addEventListener("click", () => {
   });
 });
 
-/* Kitten voice status in Settings: Ready, Setting up, or the failure
-   reason. Updated every few seconds. */
+/* Device voice status in Settings: Ready or Setting up. Updated every
+   few seconds. */
 function updateVoiceStatus() {
   const el = document.getElementById("voice-status");
   if (!el) return;
   try {
     const det = document.getElementById("voice-detail");
-    if (det && typeof KittenVoice !== "undefined" && KittenVoice.getLastSpeakInfo) {
-      const info = KittenVoice.getLastSpeakInfo() || "";
-      let step = "";
-      try { step = KittenVoice.getVoiceStep ? KittenVoice.getVoiceStep() : ""; } catch (e) {}
-      let err = "";
-      try { err = KittenVoice.getLastError ? KittenVoice.getLastError() : ""; } catch (e) {}
-      const parts = [];
-      if (info) parts.push(info);
-      if (step) parts.push("voice startup step: " + step);
-      if (err && parts.indexOf(err) < 0 && info.indexOf(err) < 0) parts.push(err);
-      const text = parts.join(" | ") || "\u2014";
-      det.textContent = text;
-      det.style.color = /FAILED|error|unavailable|did not start/i.test(text) ? "#ff7f7f" : "#999";
+    if (det && typeof LynxosTts !== "undefined" && LynxosTts.getLastSpeakInfo) {
+      const info = LynxosTts.getLastSpeakInfo() || "";
+      det.textContent = info || "\u2014";
+      det.style.color = /failed/i.test(info) ? "#ff7f7f" : "#999";
     }
-  } catch (e) {}  try {
-    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady) {
-      if (KittenVoice.isReady()) {
-        let which = "";
-        try { which = KittenVoice.getActiveVoice ? KittenVoice.getActiveVoice() : ""; } catch (e) {}
-        if (which === "device") { el.textContent = "Ready (device voice — AI voice unavailable)"; el.style.color = "#ffd97f"; try { document.getElementById("voice-retry-row").style.display = ""; } catch (e) {} return; }
-        try { document.getElementById("voice-retry-row").style.display = "none"; } catch (e) {}
-        el.textContent = "Ready (AI voice)"; el.style.color = "#7fd67f"; return;
-      }
-      const err = KittenVoice.getLastError ? KittenVoice.getLastError() : "";
-      if (err) { el.textContent = "Failed: " + err; el.style.color = "#ff7f7f"; return; }
+  } catch (e) {}
+  try {
+    if (typeof LynxosTts !== "undefined" && LynxosTts.isReady && LynxosTts.isReady()) {
+      el.textContent = "Ready (device voice)";
+      el.style.color = "#7fd67f";
+      return;
     }
   } catch (e) {}
   el.textContent = "Setting up\u2026";
@@ -3906,40 +3886,8 @@ function updateVoiceStatus() {
 setInterval(updateVoiceStatus, 5000);
 updateVoiceStatus();
 
-/* Announce once, out loud, the moment the AI voice takes over. */
-let kittenReadyAnnounced = false;
-setInterval(() => {
-  if (kittenReadyAnnounced) return;
-  try {
-    if (typeof KittenVoice !== "undefined" && KittenVoice.getActiveVoice &&
-        KittenVoice.getActiveVoice() === "ai") {
-      kittenReadyAnnounced = true;
-      queueSpeech("The new voice is ready.", 60);
-    }
-  } catch (e) {}
-}, 3000);
-
-/* If the AI voice fails, say so out loud once via the device voice
-   (which is now speaking everything) so the swap never goes unnoticed. */
-let kittenFailAnnounced = false;
-setInterval(() => {
-  if (kittenFailAnnounced) return;
-  try {
-    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && !KittenVoice.isReady() &&
-        KittenVoice.getLastError && KittenVoice.getLastError()) {
-      kittenFailAnnounced = true;
-      const msg = "The weather voice failed to load: " + KittenVoice.getLastError();
-      if (typeof LynxosTts !== "undefined" && LynxosTts.speak) LynxosTts.speak(msg);
-    }
-  } catch (e) {}
-}, 15000);
-
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("Voice check.", 999);
-});
-document.getElementById("btn-retryvoice").addEventListener("click", () => {
-  try { if (typeof KittenVoice !== "undefined" && KittenVoice.retryVoice) KittenVoice.retryVoice(); } catch (e) {}
-  queueSpeech("Retrying the AI voice.", 999);
 });
 
 /* In-app updates: checks the GitHub releases feed for this repo, compares
