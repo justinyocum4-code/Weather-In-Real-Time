@@ -448,6 +448,18 @@ jobs:
                                   else step += " | started=NO";
                                   if (de.exists()) step += " | DESTROYED";
                               } catch (Throwable ignored) {}
+                              // v3.9.13: last voice event (speak req, generated,
+                              // played OK / cut short / STOP / FAILED).
+                              try {
+                                  java.io.File ve = new java.io.File(getFilesDir(), "kitten-voice/.voice-event");
+                                  if (ve.exists()) {
+                                      java.io.FileInputStream vin = new java.io.FileInputStream(ve);
+                                      byte[] vb = new byte[(int) Math.min(ve.length(), 300)];
+                                      int vr = vin.read(vb);
+                                      vin.close();
+                                      if (vr > 0) step += " | voice: " + new String(vb, 0, vr, "UTF-8");
+                                  }
+                              } catch (Throwable ignored) {}
                               return step;
                           } catch (Throwable th) { return ""; }
                       }
@@ -922,6 +934,19 @@ jobs:
                   } catch (Throwable ignored) {}
               }
 
+              // v3.9.13: rolling record of what the voice did last —
+              // speak requests, generation, playback, stops, failures.
+              // Read by the Settings diagnostic.
+              private void markVoice(String s) {
+                  try {
+                      java.io.File d = new java.io.File(getFilesDir(), "kitten-voice");
+                      d.mkdirs();
+                      java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(d, ".voice-event"));
+                      o.write(s.getBytes("UTF-8"));
+                      o.close();
+                  } catch (Throwable ignored) {}
+              }
+
               private void startInit() {
                   new Thread(new Runnable() { @Override public void run() {
                       try {
@@ -1021,6 +1046,7 @@ jobs:
                                       text = (db != null) ? db.getString("text", "") : "";
                                   }
                                   final Messenger replyTo = msg.replyTo;
+                                  markVoice("speak req " + text.length() + " chars");
                                   if (!kittenReady || kittenTts == null || text.isEmpty()) {
                                       sendDone(replyTo, seq);
                                       break;
@@ -1033,6 +1059,7 @@ jobs:
                               }
                               case MSG_STOP:
                                   gen++;
+                                  markVoice("STOP received");
                                   try { AudioTrack tr = track; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
                                   break;
                               case MSG_GET_STATE: {
@@ -1074,6 +1101,7 @@ jobs:
                       float[] samples = audio != null ? audio.getSamples() : null;
                       int sr = audio != null ? audio.getSampleRate() : 0;
                       if (samples == null || samples.length == 0 || sr <= 0) { sendDone(replyTo, seq); return; }
+                      markVoice("generated " + samples.length + " samples @" + sr + "Hz");
                       short[] pcm = new short[samples.length];
                       for (int i = 0; i < samples.length; i++) {
                           float v = Math.max(-1f, Math.min(1f, samples[i]));
@@ -1093,6 +1121,9 @@ jobs:
                           tr.write(pcm, off, len);
                           off += len;
                       }
+                      // v3.9.13: distinguish finished playback from cut-short.
+                      if (off >= pcm.length) markVoice("played OK " + pcm.length + " samples");
+                      else markVoice("cut short at " + off + "/" + pcm.length + " samples");
                       try { tr.stop(); } catch (Throwable ignored) {}
                       try { tr.release(); } catch (Throwable ignored) {}
                       if (track == tr) track = null;
@@ -1100,6 +1131,7 @@ jobs:
                       String msg = String.valueOf(t);
                       if (msg.length() > 200) msg = msg.substring(0, 200);
                       speakInfo = "speak FAILED: " + msg;
+                      markVoice("speak FAILED: " + msg);
                   }
                   sendDone(replyTo, seq);
               }
