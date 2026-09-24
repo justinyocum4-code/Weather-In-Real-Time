@@ -174,6 +174,13 @@ jobs:
                           android:name="android.support.FILE_PROVIDER_PATHS"
                           android:resource="@xml/file_paths" />
                   </provider>
+                  <!-- The AI voice runs sealed inside its own process. If its
+                       native code ever crashes, only this process dies; the
+                       app's main process keeps running on the device voice. -->
+                  <service
+                      android:name="com.weatherrealtime.app.KittenService"
+                      android:process=":voice"
+                      android:exported="false" />
               </application>
           </manifest>
           EOF
@@ -208,14 +215,37 @@ jobs:
               private String pendingTts = null;
               private long lastBackPress = 0;
               private int ttsUtteranceSeq = 0;
-              // Kitten on-device AI voice (the app's only voice): the
-              // sherpa-onnx engine plus serialized playback state.
-              private com.k2fsa.sherpa.onnx.OfflineTts kittenTts;
-              private boolean kittenReady = false;
-              private boolean kittenStarting = false;
-              private int kittenGen = 0; // speak() generation: stop() silences older ones
-              private android.media.AudioTrack kittenTrack;
-              private String kittenSpeakInfo;
+              // Kitten on-device AI voice: every line of sherpa-onnx native
+              // code runs inside KittenService, in its own ":voice" process.
+              // This activity only holds a Messenger to it. If native code
+              // ever kills its process again, this one survives and speech
+              // falls back to the device voice.
+              private android.os.Messenger voiceService = null;
+              private boolean voiceBound = false;
+              private boolean voiceReady = false; // the :voice process warmed up
+              private boolean voiceDead = false;  // its process died / never came up
+              private String voiceError = "";     // last voice failure, plain words
+              private String kittenSpeakInfo = "";
+              private String lastVoiceUtteranceId = null; // completed if the voice process dies mid-utterance
+              private android.os.Messenger voiceReply = null; // receives MSG_DONE / MSG_STATE
+              private final android.os.IBinder.DeathRecipient voiceDeath = new android.os.IBinder.DeathRecipient() {
+                  @Override public void binderDied() { onVoiceDied("the voice process stopped", true); }
+              };
+              private final android.content.ServiceConnection voiceConn = new android.content.ServiceConnection() {
+                  @Override public void onServiceConnected(android.content.ComponentName n, android.os.IBinder b) {
+                      try {
+                          voiceService = new android.os.Messenger(b);
+                          b.linkToDeath(voiceDeath, 0);
+                          voiceBound = true;
+                          android.os.Message m = android.os.Message.obtain(null, KittenService.MSG_GET_STATE);
+                          m.replyTo = voiceReply;
+                          voiceService.send(m);
+                      } catch (Throwable ignored) {}
+                  }
+                  @Override public void onServiceDisconnected(android.content.ComponentName n) {
+                      onVoiceDied("the voice service disconnected", true);
+                  }
+              };
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -284,7 +314,7 @@ jobs:
                       }
                   }, "LynxosStore");
                   initTts();
-                  kittenEnsureInit(); // warm up the on-device AI voice in the background
+                  bindVoiceService(); // the AI voice warms up in its own process
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public String speak(String text) {
@@ -302,28 +332,35 @@ jobs:
                          speaks one emergency sentence if the AI voice fails
                          to load. The voice picker is gone. */
                   }, "LynxosTts");
-                  /* Kitten on-device AI voice: the app's only voice. Free,
-                     offline, no key, no quota. Returns an utterance id, or
-                     null when the voice isn't warmed up yet (the page waits
-                     and retries). Synthesis runs on a worker thread; playback
-                     goes through one serialized AudioTrack so utterances can
-                     never double up. */
+                  /* Kitten on-device AI voice, served through the :voice
+                     process. Returns an utterance id the page maps back via
+                     window.__onTtsDone. If the AI voice isn't up yet — or its
+                     process died — the utterance is spoken with the device
+                     voice instead, so the app never goes silent and never
+                     crashes. Same Javascript interface as before, so the page
+                     needs no changes. */
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public String speak(String text) {
                           try {
                               if (text == null || text.isEmpty()) { kittenSpeakInfo = "speak skipped: empty text"; return null; }
-                              if (!kittenReady || kittenTts == null) { kittenSpeakInfo = "speak skipped: voice not ready"; kittenEnsureInit(); return null; }
-                              kittenSpeakInfo = "speak called: " + text.length() + " chars";
-                              kittenGen++; // silence anything currently playing
-                              try { android.media.AudioTrack tr = kittenTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
-                              final String id = "kv" + (++ttsUtteranceSeq);
-                              final int gen = kittenGen;
-                              final String t = text;
-                              new Thread(new Runnable() { @Override public void run() {
-                                  kittenSpeakWorker(id, t, gen);
-                              } }).start();
-                              return id;
+                              if (voiceReady && voiceService != null && !voiceDead) {
+                                  final String id = "kv" + (++ttsUtteranceSeq);
+                                  kittenSpeakInfo = "AI voice: " + text.length() + " chars";
+                                  try {
+                                      android.os.Message m = android.os.Message.obtain(null, KittenService.MSG_SPEAK);
+                                      m.arg1 = ttsUtteranceSeq;
+                                      m.obj = text;
+                                      m.replyTo = voiceReply;
+                                      voiceService.send(m);
+                                      lastVoiceUtteranceId = id;
+                                      return id;
+                                  } catch (Throwable th) {
+                                      onVoiceDied("could not reach the voice service", true);
+                                  }
+                              }
+                              // Device-voice fallback.
+                              return deviceSpeak(text);
                           } catch (Throwable th) {
                               String msg = String.valueOf(th);
                               if (msg.length() > 200) msg = msg.substring(0, 200);
@@ -333,34 +370,54 @@ jobs:
                       }
                       @JavascriptInterface
                       public void stop() {
-                          kittenGen++;
-                          try { android.media.AudioTrack tr = kittenTrack; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                          try {
+                              if (voiceService != null && !voiceDead) {
+                                  try { voiceService.send(android.os.Message.obtain(null, KittenService.MSG_STOP)); } catch (Throwable ignored) {}
+                              }
+                          } catch (Throwable ignored) {}
+                          try { if (tts != null) tts.stop(); } catch (Throwable ignored) {}
                       }
-                      // True once the offline AI voice is warmed up and speaking.
+                      // True when something can speak: the AI voice, or the
+                      // device fallback. The presenter must not wait forever
+                      // for an AI voice that will never arrive.
                       @JavascriptInterface
-                      public boolean isReady() { return kittenReady && kittenTts != null; }
-                      // If the last init attempt failed, the reason (saved to
-                      // a file so it survives to the next launch). Empty when
-                      // the voice is ready or no failure was recorded.
+                      public boolean isReady() { return (voiceReady && !voiceDead) || ttsReady; }
+                      // Why the AI voice isn't speaking, in plain words.
+                      // Empty while the AI voice is up.
                       @JavascriptInterface
                       public String getLastError() {
                           try {
-                              if (kittenReady) return "";
-                              java.io.File f = new java.io.File(getFilesDir(), "kitten-voice/.last-error");
-                              if (!f.exists()) return "";
-                              java.io.FileInputStream in = new java.io.FileInputStream(f);
-                              byte[] b = new byte[(int) Math.min(f.length(), 512)];
-                              int n = in.read(b); in.close();
-                              if (n <= 0) return "";
-                              return new String(b, 0, n, "UTF-8");
+                              if (voiceReady && !voiceDead) return "";
+                              return voiceError == null ? "" : voiceError;
                           } catch (Throwable th) { return ""; }
                       }
-                      // Last synthesis/playback outcome in plain words.
-                      // Shown in Settings under the voice status.
+                      // Last utterance outcome in plain words, for Settings.
                       @JavascriptInterface
                       public String getLastSpeakInfo() {
                           try { return kittenSpeakInfo == null ? "" : kittenSpeakInfo; }
                           catch (Throwable th) { return ""; }
+                      }
+                      // Try the AI voice again (starts a fresh :voice process).
+                      // Safe to tap any time: if its native code crashes again,
+                      // only that process dies.
+                      @JavascriptInterface
+                      public void retryVoice() {
+                          try {
+                              if (voiceReady && !voiceDead) return; // already up
+                              try { unbindService(voiceConn); } catch (Throwable ignored) {}
+                              voiceService = null;
+                              voiceBound = false;
+                              voiceDead = false;
+                              voiceReady = false;
+                              voiceError = "";
+                              bindVoiceService();
+                          } catch (Throwable ignored) {}
+                      }
+                      // "ai" or "device": which voice is actually speaking.
+                      @JavascriptInterface
+                      public String getActiveVoice() {
+                          try { return (voiceReady && !voiceDead) ? "ai" : "device"; }
+                          catch (Throwable th) { return "device"; }
                       }
                   }, "KittenVoice");
                   /* In-app updates: download the new APK with DownloadManager
@@ -420,158 +477,86 @@ jobs:
                   setContentView(webView);
                   webView.requestFocus();
               }
-              /* Copy the bundled Kitten voice out of the APK into private
-                 storage (native code needs real file paths), then build
-                 the sherpa-onnx TTS engine on a worker thread. The copy is
-                 resumable: files already synced are skipped and each file is
-                 written atomically, so killing the app mid-copy just resumes
-                 next launch instead of starting over. */
-              private void kittenEnsureInit() {
-                  if (kittenReady || kittenStarting) return;
-                  kittenStarting = true;
-                  new Thread(new Runnable() { @Override public void run() {
-                      try {
-                          java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                          java.io.File marker = new java.io.File(dest, ".ready");
-                          java.io.File errFile = new java.io.File(dest, ".last-error");
-                          if (!marker.exists()) {
-                              syncAssetDir("kitten-voice", dest);
-                              marker.createNewFile();
-                          }
-                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
-                          java.io.File voicesFile = new java.io.File(dest, "voices.bin");
-                          java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
-                          java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
-                          if (!modelFile.exists() || !voicesFile.exists() || !tokensFile.exists() || !dataDir.exists())
-                              throw new RuntimeException("kitten voice files missing");
-                          // sherpa-onnx Android: the OfflineTts constructor takes a
-                          // nullable AssetManager. Passing null selects the
-                          // file-based native path (newFromFile), which reads the
-                          // absolute filesystem paths set above directly.
-                          // Passing getAssets() makes native code treat those
-                          // absolute paths as APK asset names, which fails.
-                          com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig kitten =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig();
-                          kitten.setModel(modelFile.getAbsolutePath());
-                          kitten.setVoices(voicesFile.getAbsolutePath());
-                          kitten.setTokens(tokensFile.getAbsolutePath());
-                          kitten.setDataDir(dataDir.getAbsolutePath());
-                          com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
-                          modelConfig.setKitten(kitten);
-                          modelConfig.setNumThreads(4);
-                          com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
-                              new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
-                          config.setModel(modelConfig);
-                          config.setMaxNumSentences(1);
-                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
-                          // Honest warm-up: proves synthesis actually works
-                          // (male voice 1, sid 0 — the voice you picked).
-                          // Warm-up failure throws, so a broken voice keeps
-                          // reporting its error instead of claiming "Ready".
-                          com.k2fsa.sherpa.onnx.GeneratedAudio warm =
-                              kittenTts.generate("Voice ready.", 0, 1.0f);
-                          float[] ws = warm != null ? warm.getSamples() : null;
-                          if (ws == null || ws.length == 0)
-                              throw new RuntimeException("warm-up produced no audio");
-                          kittenSpeakInfo = "warm-up OK: " + ws.length + " samples";
-                          kittenReady = true;
-                          try { errFile.delete(); } catch (Throwable ignored) {}
-                      } catch (Throwable t) {
-                          // Persist the reason so the next launch can report it
-                          // aloud instead of failing silently forever.
-                          try {
-                              java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
-                              dest.mkdirs();
-                              String msg = String.valueOf(t);
-                              if (msg.length() > 300) msg = msg.substring(0, 300);
-                              java.io.FileOutputStream out = new java.io.FileOutputStream(new java.io.File(dest, ".last-error"));
-                              out.write(msg.getBytes("UTF-8"));
-                              out.close();
-                          } catch (Throwable ignored) {}
-                          kittenStarting = false; // let a later speak() retry
-                      }
-                  } }).start();
-              }
-              /* One utterance on a worker thread: synthesize, then play the
-                 raw samples through a serialized AudioTrack. A generation
-                 counter stops stale playback when stop() is called. */
-              private void kittenSpeakWorker(String id, String text, int gen) {
+              /* Voice service glue. The AI voice itself lives in
+                 KittenService (the ":voice" process); here we only bind to
+                 it, route replies back to the page, and fall back to the
+                 device voice if its process ever dies. */
+              private void bindVoiceService() {
                   try {
-                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = kittenTts.generate(text, 0, 1.0f);
-                      if (gen != kittenGen) return; // stopped while synthesizing
-                      float[] samples = audio.getSamples();
-                      int sr = audio.getSampleRate();
-                      short[] pcm = new short[samples.length];
-                      for (int i = 0; i < samples.length; i++) {
-                          float v = Math.max(-1f, Math.min(1f, samples[i]));
-                          pcm[i] = (short) (v * 32767);
-                      }
-                      int ch = android.media.AudioFormat.CHANNEL_OUT_MONO;
-                      int fmt = android.media.AudioFormat.ENCODING_PCM_16BIT;
-                      int minBuf = android.media.AudioTrack.getMinBufferSize(sr, ch, fmt);
-                      android.media.AudioTrack track = new android.media.AudioTrack(
-                          android.media.AudioManager.STREAM_MUSIC, sr, ch, fmt,
-                          Math.max(minBuf, pcm.length * 2), android.media.AudioTrack.MODE_STREAM);
-                      kittenTrack = track;
-                      kittenSpeakInfo = "played " + pcm.length + " samples @ " + sr + "Hz";
-                      track.play();
-                      int off = 0;
-                      while (off < pcm.length && gen == kittenGen) {
-                          int len = Math.min(8192, pcm.length - off);
-                          track.write(pcm, off, len);
-                          off += len;
-                      }
-                      try { track.stop(); } catch (Throwable ignored) {}
-                      try { track.release(); } catch (Throwable ignored) {}
-                      if (kittenTrack == track) kittenTrack = null;
-                      if (gen == kittenGen) jsCall("window.__onTtsDone('" + id + "')");
-                  } catch (Throwable t) {
-                      // Claimed the utterance but couldn't render it: record
-                      // the reason where Settings can show it, then advance
-                      // the queue rather than stalling it.
-                      String msg = String.valueOf(t);
-                      if (msg.length() > 300) msg = msg.substring(0, 300);
-                      kittenSpeakInfo = "speak FAILED: " + msg;
-                      try { jsCall("window.__onTtsDone('" + id + "')"); } catch (Throwable ignored) {}
+                      voiceReply = new android.os.Messenger(new android.os.Handler(android.os.Looper.getMainLooper()) {
+                          @Override public void handleMessage(android.os.Message msg) {
+                              try {
+                                  if (msg.what == KittenService.MSG_DONE) {
+                                      jsCall("window.__onTtsDone('kv" + msg.arg1 + "')");
+                                  } else if (msg.what == KittenService.MSG_STATE || msg.what == KittenService.MSG_READY) {
+                                      boolean r = msg.arg1 == 1;
+                                      String err = msg.obj instanceof String ? (String) msg.obj : "";
+                                      if (r) {
+                                          voiceReady = true; voiceDead = false; voiceError = "";
+                                          kittenSpeakInfo = "AI voice ready";
+                                      } else if (err != null && !err.isEmpty()) {
+                                          onVoiceDied(err, true);
+                                      }
+                                      // Not ready and no error yet: still warming up.
+                                  }
+                              } catch (Throwable ignored) {}
+                          }
+                      });
+                      android.content.Intent svc = new android.content.Intent(this, KittenService.class);
+                      bindService(svc, voiceConn, android.content.Context.BIND_AUTO_CREATE);
+                      // Watchdog: if the service never reports back, stop waiting for it.
+                      new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                          @Override public void run() {
+                              // Timeout only: the process may still be alive
+                              // and slow, so keep the binding — a late
+                              // MSG_READY can still revive the AI voice.
+                              if (!voiceReady && !voiceDead) onVoiceDied("the voice service did not start in time", false);
+                          }
+                      }, 90000);
+                  } catch (Throwable th) {
+                      onVoiceDied("could not start the voice service", true);
                   }
               }
-              /* Copy one asset tree into private storage, skipping files that
-                 are already there. Each file is written to a .part file and
-                 renamed, so a kill mid-copy can never leave a half file:
-                 anything present is complete, and the next launch resumes
-                 where the last one stopped. */
-              private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
-                  String[] names = getAssets().list(assetPath);
-                  if (names == null) return;
-                  dest.mkdirs();
-                  for (String n : names) {
-                      String rel = assetPath.isEmpty() ? n : assetPath + "/" + n;
-                      String[] sub = getAssets().list(rel);
-                      if (sub != null && sub.length > 0) {
-                          syncAssetDir(rel, new java.io.File(dest, n));
-                      } else {
-                          java.io.File out = new java.io.File(dest, n);
-                          if (out.exists()) continue;
-                          java.io.File part = new java.io.File(dest, n + ".part");
-                          java.io.InputStream in = getAssets().open(rel);
-                          java.io.FileOutputStream fos = new java.io.FileOutputStream(part);
-                          byte[] buf = new byte[65536];
-                          int r;
-                          while ((r = in.read(buf)) > 0) fos.write(buf, 0, r);
-                          fos.close();
-                          in.close();
-                          if (!part.renameTo(out)) {
-                              java.io.FileInputStream fin = new java.io.FileInputStream(part);
-                              java.io.FileOutputStream fout = new java.io.FileOutputStream(out);
-                              byte[] b2 = new byte[65536];
-                              int r2;
-                              while ((r2 = fin.read(b2)) > 0) fout.write(b2, 0, r2);
-                              fout.close();
-                              fin.close();
-                              part.delete();
-                          }
+              /* The :voice process is gone (or never came up). Remember why
+                 and let every later utterance use the device voice. The app
+                 itself keeps running — a dead voice can never kill it. */
+              private void onVoiceDied(String reason, boolean deadBinding) {
+                  try {
+                      if (voiceDead && voiceError != null && !voiceError.isEmpty()) return; // already reported
+                      voiceDead = true;
+                      voiceReady = false;
+                      voiceError = reason == null ? "the AI voice stopped" : reason;
+                      kittenSpeakInfo = "AI voice unavailable: " + voiceError + " — using device voice";
+                      if (deadBinding) {
+                          try { unbindService(voiceConn); } catch (Throwable ignored) {}
+                          voiceService = null;
+                          voiceBound = false;
                       }
+                      // Unstick the page now: its fallback timer would also
+                      // advance, but only after 20+ seconds of silence.
+                      try {
+                          if (lastVoiceUtteranceId != null) {
+                              final String doneId = lastVoiceUtteranceId;
+                              lastVoiceUtteranceId = null;
+                              jsCall("window.__onTtsDone('" + doneId + "')");
+                          }
+                      } catch (Throwable ignored2) {}
+                  } catch (Throwable ignored) {}
+              }
+              /* Device-voice fallback: speak one utterance with the system
+                 voice and report completion exactly like the AI voice does,
+                 so the page's queue keeps moving. */
+              private String deviceSpeak(String text) {
+                  try {
+                      if (!ttsReady || tts == null) { kittenSpeakInfo = "device voice not ready yet"; return null; }
+                      final String id = "dv" + (++ttsUtteranceSeq);
+                      kittenSpeakInfo = "device voice: " + text.length() + " chars";
+                      tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, id);
+                      lastVoiceUtteranceId = id;
+                      return id;
+                  } catch (Throwable th) {
+                      kittenSpeakInfo = "device voice failed";
+                      return null;
                   }
               }
 
@@ -734,6 +719,250 @@ jobs:
                   if (now - lastBackPress < 2500) { super.onBackPressed(); return; }
                   lastBackPress = now;
                   android.widget.Toast.makeText(this, "Press back again to exit", android.widget.Toast.LENGTH_SHORT).show();
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/weatherrealtime/app/KittenService.java <<'EOF'
+          package com.weatherrealtime.app;
+
+          import android.app.Service;
+          import android.content.Intent;
+          import android.media.AudioFormat;
+          import android.media.AudioManager;
+          import android.media.AudioTrack;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.Message;
+          import android.os.Messenger;
+
+          /* The on-device AI voice (Kitten via sherpa-onnx), sealed inside its
+             own ":voice" process. sherpa's native code calls _Exit() when its
+             init fails, which would kill the whole app in the main process -
+             here only this lightweight process dies, and the main process
+             notices the binder death and falls back to the device voice.
+             This class is the ONLY place that touches sherpa-onnx. */
+          public class KittenService extends Service {
+              static final int MSG_SPEAK = 1;
+              static final int MSG_STOP = 2;
+              static final int MSG_GET_STATE = 3;
+              static final int MSG_STATE = 4;
+              static final int MSG_DONE = 5;
+              static final int MSG_READY = 6;
+
+              private Messenger messenger;
+              private final java.util.Set<Messenger> clients =
+                  java.util.Collections.synchronizedSet(new java.util.HashSet<Messenger>());
+              private com.k2fsa.sherpa.onnx.OfflineTts kittenTts = null;
+              private volatile boolean kittenReady = false;
+              private volatile String kittenError = null;
+              private volatile int gen = 0;
+              private volatile AudioTrack track = null;
+              private volatile String speakInfo = "";
+
+              @Override public void onCreate() {
+                  super.onCreate();
+                  messenger = new Messenger(new IncomingHandler(Looper.getMainLooper()));
+                  startInit();
+              }
+
+              @Override public IBinder onBind(Intent intent) { return messenger.getBinder(); }
+
+              private void mark(String s) {
+                  try {
+                      java.io.File d = new java.io.File(getFilesDir(), "kitten-voice");
+                      d.mkdirs();
+                      java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(d, ".step"));
+                      o.write(s.getBytes("UTF-8"));
+                      o.close();
+                  } catch (Throwable ignored) {}
+              }
+
+              private void startInit() {
+                  new Thread(new Runnable() { @Override public void run() {
+                      try {
+                          mark("init-start");
+                          java.io.File dest = new java.io.File(getFilesDir(), "kitten-voice");
+                          java.io.File marker = new java.io.File(dest, ".ready");
+                          if (!marker.exists()) {
+                              syncAssetDir("kitten-voice", dest);
+                              marker.createNewFile();
+                          }
+                          mark("copy-done");
+                          java.io.File modelFile = new java.io.File(dest, "model.onnx");
+                          java.io.File voicesFile = new java.io.File(dest, "voices.bin");
+                          java.io.File tokensFile = new java.io.File(dest, "tokens.txt");
+                          java.io.File dataDir = new java.io.File(dest, "espeak-ng-data");
+                          if (!modelFile.exists() || !voicesFile.exists() || !tokensFile.exists() || !dataDir.isDirectory())
+                              throw new RuntimeException("kitten voice files missing after copy");
+                          mark("constructing");
+                          com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig kitten =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsKittenModelConfig();
+                          kitten.setModel(modelFile.getAbsolutePath());
+                          kitten.setVoices(voicesFile.getAbsolutePath());
+                          kitten.setTokens(tokensFile.getAbsolutePath());
+                          kitten.setDataDir(dataDir.getAbsolutePath());
+                          com.k2fsa.sherpa.onnx.OfflineTtsModelConfig modelConfig =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsModelConfig();
+                          modelConfig.setKitten(kitten);
+                          modelConfig.setNumThreads(2);
+                          com.k2fsa.sherpa.onnx.OfflineTtsConfig config =
+                              new com.k2fsa.sherpa.onnx.OfflineTtsConfig();
+                          config.setModel(modelConfig);
+                          config.setMaxNumSentences(1);
+                          kittenTts = new com.k2fsa.sherpa.onnx.OfflineTts(null, config);
+                          mark("constructed");
+                          com.k2fsa.sherpa.onnx.GeneratedAudio warm =
+                              kittenTts.generate("Voice ready.", 0, 1.0f);
+                          float[] ws = warm != null ? warm.getSamples() : null;
+                          if (ws == null || ws.length == 0)
+                              throw new RuntimeException("warm-up produced no audio");
+                          mark("ready");
+                          speakInfo = "warm-up OK: " + ws.length + " samples";
+                          kittenReady = true;
+                      } catch (Throwable t) {
+                          String msg = String.valueOf(t);
+                          if (msg.length() > 300) msg = msg.substring(0, 300);
+                          kittenError = msg;
+                          mark("error: " + msg);
+                      }
+                      broadcastReady();
+                  } }).start();
+              }
+
+              private void broadcastReady() {
+                  try {
+                      Message m = Message.obtain(null, MSG_READY);
+                      m.arg1 = kittenReady ? 1 : 0;
+                      m.obj = kittenReady ? null : kittenError;
+                      synchronized (clients) {
+                          for (Messenger c : clients) {
+                              try { c.send(Message.obtain(m)); } catch (Throwable ignored) {}
+                          }
+                      }
+                      m.recycle();
+                  } catch (Throwable ignored) {}
+              }
+
+              private class IncomingHandler extends Handler {
+                  IncomingHandler(Looper looper) { super(looper); }
+                  @Override public void handleMessage(Message msg) {
+                      try {
+                          if (msg.replyTo != null) clients.add(msg.replyTo);
+                          switch (msg.what) {
+                              case MSG_SPEAK: {
+                                  final int seq = msg.arg1;
+                                  final String text = msg.obj instanceof String ? (String) msg.obj : "";
+                                  final Messenger replyTo = msg.replyTo;
+                                  if (!kittenReady || kittenTts == null || text.isEmpty()) {
+                                      sendDone(replyTo, seq);
+                                      break;
+                                  }
+                                  final int g = gen;
+                                  new Thread(new Runnable() { @Override public void run() {
+                                      speakWorker(seq, text, g, replyTo);
+                                  } }).start();
+                                  break;
+                              }
+                              case MSG_STOP:
+                                  gen++;
+                                  try { AudioTrack tr = track; if (tr != null) tr.stop(); } catch (Throwable ignored) {}
+                                  break;
+                              case MSG_GET_STATE: {
+                                  Messenger replyTo = msg.replyTo;
+                                  if (replyTo != null) {
+                                      Message r = Message.obtain(null, MSG_STATE);
+                                      r.arg1 = kittenReady ? 1 : 0;
+                                      r.obj = kittenReady ? null : kittenError;
+                                      try { replyTo.send(r); } catch (Throwable ignored) {}
+                                  }
+                                  break;
+                              }
+                          }
+                      } catch (Throwable ignored) {}
+                  }
+              }
+
+              private void sendDone(Messenger replyTo, int seq) {
+                  if (replyTo == null) return;
+                  try {
+                      Message m = Message.obtain(null, MSG_DONE);
+                      m.arg1 = seq;
+                      replyTo.send(m);
+                  } catch (Throwable ignored) {}
+              }
+
+              private void speakWorker(int seq, String text, int g, Messenger replyTo) {
+                  try {
+                      com.k2fsa.sherpa.onnx.OfflineTts tts = kittenTts;
+                      if (tts == null || g != gen) { sendDone(replyTo, seq); return; }
+                      com.k2fsa.sherpa.onnx.GeneratedAudio audio = tts.generate(text, 0, 1.0f);
+                      if (g != gen) { sendDone(replyTo, seq); return; }
+                      float[] samples = audio != null ? audio.getSamples() : null;
+                      int sr = audio != null ? audio.getSampleRate() : 0;
+                      if (samples == null || samples.length == 0 || sr <= 0) { sendDone(replyTo, seq); return; }
+                      short[] pcm = new short[samples.length];
+                      for (int i = 0; i < samples.length; i++) {
+                          float v = Math.max(-1f, Math.min(1f, samples[i]));
+                          pcm[i] = (short) (v * 32767);
+                      }
+                      int ch = AudioFormat.CHANNEL_OUT_MONO;
+                      int fmt = AudioFormat.ENCODING_PCM_16BIT;
+                      int minBuf = AudioTrack.getMinBufferSize(sr, ch, fmt);
+                      AudioTrack tr = new AudioTrack(AudioManager.STREAM_MUSIC, sr, ch, fmt,
+                          Math.max(minBuf, pcm.length * 2), AudioTrack.MODE_STREAM);
+                      track = tr;
+                      speakInfo = "played " + pcm.length + " samples @ " + sr + "Hz";
+                      tr.play();
+                      int off = 0;
+                      while (off < pcm.length && g == gen) {
+                          int len = Math.min(8192, pcm.length - off);
+                          tr.write(pcm, off, len);
+                          off += len;
+                      }
+                      try { tr.stop(); } catch (Throwable ignored) {}
+                      try { tr.release(); } catch (Throwable ignored) {}
+                      if (track == tr) track = null;
+                  } catch (Throwable t) {
+                      String msg = String.valueOf(t);
+                      if (msg.length() > 200) msg = msg.substring(0, 200);
+                      speakInfo = "speak FAILED: " + msg;
+                  }
+                  sendDone(replyTo, seq);
+              }
+
+              private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
+                  String[] names = getAssets().list(assetPath);
+                  if (names == null) return;
+                  dest.mkdirs();
+                  for (String n : names) {
+                      String rel = assetPath.isEmpty() ? n : assetPath + "/" + n;
+                      String[] sub = getAssets().list(rel);
+                      if (sub != null && sub.length > 0) {
+                          syncAssetDir(rel, new java.io.File(dest, n));
+                      } else {
+                          java.io.File out = new java.io.File(dest, n);
+                          if (out.exists()) continue;
+                          java.io.File part = new java.io.File(dest, n + ".part");
+                          java.io.InputStream in = getAssets().open(rel);
+                          java.io.FileOutputStream fos = new java.io.FileOutputStream(part);
+                          byte[] buf = new byte[65536];
+                          int r;
+                          while ((r = in.read(buf)) > 0) fos.write(buf, 0, r);
+                          fos.close();
+                          in.close();
+                          if (!part.renameTo(out)) {
+                              java.io.FileInputStream fin = new java.io.FileInputStream(part);
+                              java.io.FileOutputStream fout = new java.io.FileOutputStream(out);
+                              byte[] b2 = new byte[65536];
+                              int r2;
+                              while ((r2 = fin.read(b2)) > 0) fout.write(b2, 0, r2);
+                              fout.close();
+                              fin.close();
+                              part.delete();
+                          }
+                      }
+                  }
               }
           }
           EOF
