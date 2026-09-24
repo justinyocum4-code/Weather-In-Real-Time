@@ -893,7 +893,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.1";
+const WRT_VERSION = "3.9.2";
 const WRT_VERSION_CODE = 57;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
@@ -3874,11 +3874,19 @@ function updateVoiceStatus() {
     const det = document.getElementById("voice-detail");
     if (det && typeof KittenVoice !== "undefined" && KittenVoice.getLastSpeakInfo) {
       const info = KittenVoice.getLastSpeakInfo() || "";
-      det.textContent = info || "\u2014";
-      det.style.color = /FAILED/.test(info) ? "#ff7f7f" : "#999";
+      let step = "";
+      try { step = KittenVoice.getVoiceStep ? KittenVoice.getVoiceStep() : ""; } catch (e) {}
+      let err = "";
+      try { err = KittenVoice.getLastError ? KittenVoice.getLastError() : ""; } catch (e) {}
+      const parts = [];
+      if (info) parts.push(info);
+      if (step) parts.push("voice startup step: " + step);
+      if (err && parts.indexOf(err) < 0 && info.indexOf(err) < 0) parts.push(err);
+      const text = parts.join(" | ") || "\u2014";
+      det.textContent = text;
+      det.style.color = /FAILED|error|unavailable|did not start/i.test(text) ? "#ff7f7f" : "#999";
     }
-  } catch (e) {}
-  try {
+  } catch (e) {}  try {
     if (typeof KittenVoice !== "undefined" && KittenVoice.isReady) {
       if (KittenVoice.isReady()) {
         let which = "";
