@@ -975,35 +975,6 @@ jobs:
               }
 
               private void syncAssetDir(String assetPath, java.io.File dest) throws java.io.IOException {
-
-              // Builds an OfflineTts without running its public
-              // constructor. The JitPack AAR only ships
-              // OfflineTts(AssetManager, config), whose native side is not
-              // exception-guarded and kills the process on any failure.
-              // The native newFromFile IS guarded, so we allocate the
-              // object via Unsafe, invoke newFromFile reflectively, and
-              // set its native pointer field directly.
-              private com.k2fsa.sherpa.onnx.OfflineTts newOfflineTtsFromFile(
-                      com.k2fsa.sherpa.onnx.OfflineTtsConfig config) throws Exception {
-                  Class<?> cls = Class.forName("com.k2fsa.sherpa.onnx.OfflineTts");
-                  java.lang.reflect.Field fUnsafe =
-                      Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
-                  fUnsafe.setAccessible(true);
-                  Object unsafe = fUnsafe.get(null);
-                  java.lang.reflect.Method alloc =
-                      unsafe.getClass().getMethod("allocateInstance", Class.class);
-                  Object tts = alloc.invoke(unsafe, cls);
-                  java.lang.reflect.Method newFromFile = cls.getDeclaredMethod(
-                      "newFromFile",
-                      Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig"));
-                  newFromFile.setAccessible(true);
-                  long ptr = ((Long) newFromFile.invoke(null, config)).longValue();
-                  if (ptr == 0) throw new RuntimeException("newFromFile returned null pointer");
-                  java.lang.reflect.Field fPtr = cls.getDeclaredField("ptr");
-                  fPtr.setAccessible(true);
-                  fPtr.setLong(tts, ptr);
-                  return (com.k2fsa.sherpa.onnx.OfflineTts) tts;
-              }
                   String[] names = getAssets().list(assetPath);
                   if (names == null) return;
                   dest.mkdirs();
@@ -1035,6 +1006,35 @@ jobs:
                           }
                       }
                   }
+              }
+
+              // Builds an OfflineTts without running its public
+              // constructor. The JitPack AAR only ships
+              // OfflineTts(AssetManager, config), whose native side is not
+              // exception-guarded and kills the process on any failure.
+              // The native newFromFile IS guarded, so we allocate the
+              // object via Unsafe, invoke newFromFile reflectively, and
+              // set its native pointer field directly.
+              private com.k2fsa.sherpa.onnx.OfflineTts newOfflineTtsFromFile(
+                      com.k2fsa.sherpa.onnx.OfflineTtsConfig config) throws Exception {
+                  Class<?> cls = Class.forName("com.k2fsa.sherpa.onnx.OfflineTts");
+                  java.lang.reflect.Field fUnsafe =
+                      Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe");
+                  fUnsafe.setAccessible(true);
+                  Object unsafe = fUnsafe.get(null);
+                  java.lang.reflect.Method alloc =
+                      unsafe.getClass().getMethod("allocateInstance", Class.class);
+                  Object tts = alloc.invoke(unsafe, cls);
+                  java.lang.reflect.Method newFromFile = cls.getDeclaredMethod(
+                      "newFromFile",
+                      Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig"));
+                  newFromFile.setAccessible(true);
+                  long ptr = ((Long) newFromFile.invoke(null, config)).longValue();
+                  if (ptr == 0) throw new RuntimeException("newFromFile returned null pointer");
+                  java.lang.reflect.Field fPtr = cls.getDeclaredField("ptr");
+                  fPtr.setAccessible(true);
+                  fPtr.setLong(tts, ptr);
+                  return (com.k2fsa.sherpa.onnx.OfflineTts) tts;
               }
           }
           EOF
