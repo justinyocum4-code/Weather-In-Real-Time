@@ -1029,7 +1029,11 @@ jobs:
                       "newFromFile",
                       Class.forName("com.k2fsa.sherpa.onnx.OfflineTtsConfig"));
                   newFromFile.setAccessible(true);
-                  long ptr = ((Long) newFromFile.invoke(null, config)).longValue();
+                  // newFromFile may be an instance method: invoke it on the
+                  // allocated object, not on null (null receiver NPEs).
+                  Object recv = java.lang.reflect.Modifier.isStatic(
+                      newFromFile.getModifiers()) ? null : tts;
+                  long ptr = ((Long) newFromFile.invoke(recv, config)).longValue();
                   if (ptr == 0) throw new RuntimeException("newFromFile returned null pointer");
                   java.lang.reflect.Field fPtr = cls.getDeclaredField("ptr");
                   fPtr.setAccessible(true);
