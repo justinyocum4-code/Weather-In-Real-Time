@@ -889,8 +889,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.22";
-const WRT_VERSION_CODE = 80;
+const WRT_VERSION = "3.9.23";
+const WRT_VERSION_CODE = 81;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -1705,11 +1705,13 @@ function scheduleTourNext() {
   if (!map || !currentFeatures.length) return;
   if (!voice.enabled || chatterMode() === "off") return;
   try {
+    // Report EVERYTHING: the full active list, most severe first, each read
+    // exactly once. With hundreds of alerts this runs for hours like a
+    // 24/7 stream — new alerts still jump in immediately via onNewAlert.
     const feats = [...currentFeatures]
       .sort((a, b) => scoreAlert(b.properties || {}) - scoreAlert(a.properties || {}))
-      .slice(0, 12)
       .filter(f => !tourSpokenIds.has(f.id));
-    if (!feats.length) return; // every active alert has been read — rest
+    if (!feats.length) return; // every active alert has been read — rest until new ones arrive
     // A storm within 25 miles of the listener owns the tour: stay on it
     // instead of wandering the country.
     let f = feats[tourIndex % feats.length];
@@ -2084,12 +2086,12 @@ function expiresSpoken(p) {
       // US daylight time runs roughly March–November; normalize to standard offset.
       const dst = mo >= 2 && mo <= 10;
       const base = dst ? off - 1 : off;
-      if (base === -5) tz = " Eastern";
-      else if (base === -6) tz = " Central";
-      else if (base === -7) tz = " Mountain";
-      else if (base === -8) tz = " Pacific";
-      else if (base === -9) tz = " Alaska";
-      else if (base === -10) tz = " Hawaii";
+      if (base === -5) tz = " Eastern Time";
+      else if (base === -6) tz = " Central Time";
+      else if (base === -7) tz = " Mountain Time";
+      else if (base === -8) tz = " Pacific Time";
+      else if (base === -9) tz = " Alaska Time";
+      else if (base === -10) tz = " Hawaii Time";
     } else {
       const d = new Date(t);
       h = d.getHours(); m = d.getMinutes(); // no offset info — device zone, no label
@@ -2190,6 +2192,17 @@ function fixSpokenTimes(text) {
   return text;
 }
 
+/* Cut text at a sentence boundary under max chars — never mid-sentence. */
+function sentenceCut(s, max) {
+  if (!s || s.length <= max) return s || "";
+  const cut = s.slice(0, max);
+  const lastEnd = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+  if (lastEnd > 20) return cut.slice(0, lastEnd + 1); // end at the last full sentence
+  const lastSpace = cut.lastIndexOf(" "); // no sentence end: cut at a word boundary
+  if (lastSpace > 20) return cut.slice(0, lastSpace) + ".";
+  return cut.trimEnd() + ".";
+}
+
 function buildAnnouncement(p, f) {
   const event = p.event || "Weather alert";
   const ev = event.toLowerCase();
@@ -2239,6 +2252,19 @@ function buildAnnouncement(p, f) {
            (exp ? ", " + exp : "") + ".";
     const summary = extractStatementSummary(desc);
     if (summary) text += " " + summary;
+  } else if (/local area emergency|civil emergency|civil danger|law enforcement|evacuation|shelter in place|radiological|nuclear|911 telephone|child abduction/i.test(ev)) {
+    // Non-weather emergencies (AMBER alerts, evacuations, civil emergencies):
+    // the description IS the message — read what the emergency actually is,
+    // not just the alert type and county.
+    text = nextOpener() + " " + event + (area ? ", covering " + area : "") +
+           (exp ? ", " + exp : "") + ".";
+    const emSummary = extractStatementSummary(desc);
+    if (emSummary) {
+      text += " " + emSummary;
+    } else {
+      const clean = desc.replace(/\s+/g, " ").replace(/\*\s*/g, "").trim().replace(/[.\s]+$/, "");
+      if (clean) text += " " + sentenceCut(clean, 900);
+    }
   } else {
     // Everything else: conversational but structured.
     text = nextOpener() + " " + event.toLowerCase() + (area ? ", covering " + area : "") +
@@ -2248,7 +2274,7 @@ function buildAnnouncement(p, f) {
     const impacts = extractRoadImpacts(desc);
     if (impacts) text += " They're reporting " + impacts;
   }
-  if (text.length > 650) text = text.slice(0, 650) + ".";
+  if (text.length > 650) text = sentenceCut(text, 650);
   return fixSpokenTimes(text);
 }
 
