@@ -889,7 +889,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.19";
+const WRT_VERSION = "3.9.20";
 const WRT_VERSION_CODE = 77;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
@@ -984,6 +984,7 @@ const presenter = {
   currentItem: null,
   fallbackTimer: null,
   epoch: 0, // bumped by clear(): a stale fly-to arrival stays silent
+  settleSeq: 0, // bumped by settleThenNext()/clear(): a stale settle wait stays silent
 
   /* move: {lat, lon, zoom} or null. score >= 900 interrupts everything. */
   add(text, move, score) {
@@ -1015,6 +1016,7 @@ const presenter = {
     this.currentId = null;
     this.currentItem = null;
     this.epoch++;
+    this.settleSeq++; // abort any pending settle wait
     musicDuck(false);
     if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
     try { ttsStop(); } catch (e) {}
@@ -1055,10 +1057,11 @@ const presenter = {
       // Watchdog only: the native side reports real utterance completion,
       // so this timer should essentially never fire. It exists in case
       // the finished-callback is ever lost — set far beyond any real
-      // speech time so it can never cut a report short.
+      // speech time so it can never cut a report short. It goes through
+      // settleThenNext too, so a still-talking engine is never cut off.
       const ms = Math.min(600000, Math.max(45000, item.text.length * 800));
       if (this.fallbackTimer) clearTimeout(this.fallbackTimer);
-      this.fallbackTimer = setTimeout(() => this.next(), ms);
+      this.fallbackTimer = setTimeout(() => this.settleThenNext(), ms);
     };
     if (item.move && map) {
       let moved = false;
@@ -1077,7 +1080,36 @@ const presenter = {
   onUtteranceDone(id) {
     if (!this.busy) return;
     if (id && this.currentId && id !== this.currentId) return; // stale callback
-    this.next();
+    this.settleThenNext();
+  },
+
+  /* Some TTS engines (notably on Fire TV) fire the finished-callback EARLY —
+     partway through a long utterance, not when the audio actually ends. If we
+     trusted it, the next report's QUEUE_FLUSH speak would cut the still-talking
+     report off mid-sentence: short reports would finish, long ones wouldn't.
+     So after the callback we wait until the engine is truly silent (two
+     consecutive silent polls, ~800ms of real quiet), or a generous timeout,
+     before advancing. */
+  settleThenNext() {
+    if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
+    const mySeq = ++this.settleSeq;
+    const textLen = this.currentItem ? this.currentItem.text.length : 0;
+    const maxWait = Math.min(600000, Math.max(45000, textLen * 800));
+    const started = Date.now();
+    let quietPolls = 0;
+    const check = () => {
+      if (mySeq !== this.settleSeq) return; // superseded (cleared / urgent cut-in)
+      let speaking = false;
+      try {
+        speaking = (typeof LynxosTts !== "undefined" && LynxosTts.isSpeaking) ?
+          !!LynxosTts.isSpeaking() : false;
+      } catch (e) { speaking = false; }
+      if (!speaking) quietPolls++;
+      else quietPolls = 0;
+      if (quietPolls >= 2 || Date.now() - started > maxWait) { this.next(); return; }
+      setTimeout(check, 400);
+    };
+    check();
   },
 
   next() {
