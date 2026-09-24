@@ -854,6 +854,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
       <span>Voice</span>
       <span style="text-align:right;"><span id="voice-status" style="font-weight:bold;">Setting up…</span><br><span id="voice-detail" style="font-size:12px;color:#999;">—</span></span>
     </div>
+    <div class="setting-row" id="voice-retry-row" style="display:none;">
+      <span>AI voice unavailable</span>
+      <button type="button" class="toggle" id="btn-retryvoice" style="min-width:140px;">Retry AI voice</button>
+    </div>
     <div class="setting-row">
       <span>Background music</span>
       <button type="button" class="toggle" id="tgl-music" aria-pressed="true">On</button>
@@ -889,8 +893,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 <script>
 "use strict";
 /* ============ Version ============ */
-const WRT_VERSION = "3.9.0";
-const WRT_VERSION_CODE = 56;
+const WRT_VERSION = "3.9.1";
+const WRT_VERSION_CODE = 57;
 
 /* ============ Store (LynxosStore bridge, localStorage fallback) ============ */
 const store = {
@@ -949,8 +953,9 @@ function expandStates(text) {
 /* The voice: Kitten, the on-device AI voice (male voice 1), served through
    the native KittenVoice bridge. Returns our speaker id; the native side
    reports its own utterance id back via window.__onTtsDone and we map it.
-   Null means Kitten isn't warmed up yet — the presenter waits and retries
-   instead of dropping the utterance. There are no fallback voices. */
+   Null means no voice is ready yet — the presenter waits and retries
+   instead of dropping the utterance. If the AI voice can't start, the
+   bridge silently uses the device voice so the app never goes silent. */
 let utteranceSeq = 0;
 const pvIdMap = {}; // native utterance id -> our speaker id
 function ttsSpeak(text) {
@@ -3875,7 +3880,13 @@ function updateVoiceStatus() {
   } catch (e) {}
   try {
     if (typeof KittenVoice !== "undefined" && KittenVoice.isReady) {
-      if (KittenVoice.isReady()) { el.textContent = "Ready"; el.style.color = "#7fd67f"; return; }
+      if (KittenVoice.isReady()) {
+        let which = "";
+        try { which = KittenVoice.getActiveVoice ? KittenVoice.getActiveVoice() : ""; } catch (e) {}
+        if (which === "device") { el.textContent = "Ready (device voice — AI voice unavailable)"; el.style.color = "#ffd97f"; try { document.getElementById("voice-retry-row").style.display = ""; } catch (e) {} return; }
+        try { document.getElementById("voice-retry-row").style.display = "none"; } catch (e) {}
+        el.textContent = "Ready (AI voice)"; el.style.color = "#7fd67f"; return;
+      }
       const err = KittenVoice.getLastError ? KittenVoice.getLastError() : "";
       if (err) { el.textContent = "Failed: " + err; el.style.color = "#ff7f7f"; return; }
     }
@@ -3886,21 +3897,21 @@ function updateVoiceStatus() {
 setInterval(updateVoiceStatus, 5000);
 updateVoiceStatus();
 
-/* Announce once, out loud, the moment the new voice takes over. */
+/* Announce once, out loud, the moment the AI voice takes over. */
 let kittenReadyAnnounced = false;
 setInterval(() => {
   if (kittenReadyAnnounced) return;
   try {
-    if (typeof KittenVoice !== "undefined" && KittenVoice.isReady && KittenVoice.isReady()) {
+    if (typeof KittenVoice !== "undefined" && KittenVoice.getActiveVoice &&
+        KittenVoice.getActiveVoice() === "ai") {
       kittenReadyAnnounced = true;
       queueSpeech("The new voice is ready.", 60);
     }
   } catch (e) {}
 }, 3000);
 
-/* If Kitten never becomes ready, say so out loud once via the device voice
-   so a silent failure can never go unnoticed. This is the only thing the
-   old device voice is ever used for now. */
+/* If the AI voice fails, say so out loud once via the device voice
+   (which is now speaking everything) so the swap never goes unnoticed. */
 let kittenFailAnnounced = false;
 setInterval(() => {
   if (kittenFailAnnounced) return;
@@ -3916,6 +3927,10 @@ setInterval(() => {
 
 document.getElementById("btn-testvoice").addEventListener("click", () => {
   queueSpeech("Voice check.", 999);
+});
+document.getElementById("btn-retryvoice").addEventListener("click", () => {
+  try { if (typeof KittenVoice !== "undefined" && KittenVoice.retryVoice) KittenVoice.retryVoice(); } catch (e) {}
+  queueSpeech("Retrying the AI voice.", 999);
 });
 
 /* In-app updates: checks the GitHub releases feed for this repo, compares
