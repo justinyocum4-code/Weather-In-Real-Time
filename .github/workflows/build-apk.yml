@@ -81,6 +81,12 @@ jobs:
           else
             echo "WARNING: tv_banner.png not found; Leanback banner skipped."
           fi
+          if [ -f app_icon.png ]; then
+            cp app_icon.png app/src/main/res/drawable/app_icon.png
+            echo "App icon installed."
+          else
+            echo "WARNING: app_icon.png not found; default icon used."
+          fi
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -144,6 +150,7 @@ jobs:
               <uses-feature android:name="android.software.leanback" android:required="false"/>
               <application
                   android:label="Weather In Real Time"
+                  android:icon="@drawable/app_icon"
                   android:banner="@drawable/tv_banner"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
                   <activity
